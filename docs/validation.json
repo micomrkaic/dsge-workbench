@@ -1,6 +1,6 @@
 {
  "dynare": "6.0",
- "cozy": "0.1.31",
+ "cozy": "0.1.33",
  "models": [
   {
    "file": "rbc.mod",

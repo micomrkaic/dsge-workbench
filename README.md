@@ -61,7 +61,7 @@ numbers. It solves nothing.
 The numerical work is done by [Cozy](https://github.com/micomrkaic/cozy), a
 small matrix language written in C, and its `dsge` package. The Cozy
 interpreter is compiled to WebAssembly (`docs/vendor/cozy-engine.js`, about
-850 kB) and runs in a web worker. `docs/js/solve.js` writes the model as
+890 kB) and runs in a web worker. `docs/js/solve.js` writes the model as
 Cozy source, and a few functions of the workbench's own, also in Cozy
 (`docs/js/prelude.js`), compute moments that cope with unit roots. The
 "Cozy script" tab shows the model as a script you can run in Cozy's
