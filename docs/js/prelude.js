@@ -67,7 +67,7 @@ let wb_moments = fn P, C, K -> (
   let v = wb_cov(P, C);
   let none = 0.0 / 0.0;
   let d = pick(v.unit, none, diag(v.S));
-  let sd = pick(v.unit, none, sqrt(pick(v.unit, 0.0, max(diag(v.S), 0.0))));   % sqrt never sees a nan
+  let sd = sqrt(max(d, 0.0));                         % nan stays nan (Cozy 0.1.31 and later)
   let still = sd == 0.0;                              % a variable that never moves has no correlations
   let den = pick(still, none, sd) * pick(still, none, sd)';
   let ac = zeros(n, K);
