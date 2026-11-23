@@ -47,6 +47,32 @@ function startingValues(model, values) {
   return init;
 }
 
+/* An initval block written as formulas in the parameters, as a Cozy
+ * function of the parameters (wb_init), so that the starting values follow
+ * a parameter that is moved, as they do when Dynare runs the file again.
+ * Empty if the block holds only numbers. Mirrors startingValues. */
+function initFunction(model, nm, lets) {
+  const c = nm.c, params = new Set(model.params.map(p => p.name)), assigned = new Set(), other = new Set();
+  let follows = false;
+  for (const a of model.init) {
+    walkAst(a.expr, n => {
+      if (!n.name) return;
+      if (params.has(n.name)) follows = true;
+      else if (!assigned.has(n.name)) other.add(n.name);      /* not given a value yet: zero, as in startingValues */
+    });
+    assigned.add(a.name);
+  }
+  if (!follows) return "";
+  const zeros = [...other].map(name => `let ${c(name)} = 0.0;`).join(" ");
+  const body = model.init.map(a => `let ${c(a.name)} = ${printAst(a.expr, nm.value)};`).join(" ");
+  const out = model.endo.map(v => {
+    let root = v.name;
+    while (root && model.endo.find(u => u.name === root).aux) { const d = model.endo.find(u => u.name === root).def; root = d.t === "var" ? d.name : null; }
+    return root && assigned.has(root) ? `1.0 * ${c(root)}` : "0.0";
+  });
+  return `let wb_init = fn p__ -> (${lets} ${zeros} ${body} [${out.join("; ")}]);\n`;
+}
+
 /* Is the model satisfied with every variable at zero? (True of a linear
  * model without constants; then zero is its steady state.) */
 function zeroSteadyState(model, values) {
@@ -74,7 +100,7 @@ export function modelSource(model, opt = {}) {
     `params = {${paramRec.join(", ")}}`,
   ];
   const lets = pnames.map(name => `let ${c(name)} = p__.${c(name)};`).join(" ");
-  let steadyKind = "search";
+  let steadyKind = "search", wbInit = "";
   if (model.steady) {
     const assigned = new Set(model.steady.lines.map(a => a.name));
     const body = model.steady.lines.map(a => `let ${c(a.name)} = ${printAst(a.expr, nm.value)};`).join(" ");
@@ -93,6 +119,7 @@ export function modelSource(model, opt = {}) {
   } else {
     /* the search starts from initval; a variable without one starts at zero, as in Dynare */
     fields.push(`init = {${model.endo.map(v => `${c(v.name)} = ${cozyNum(init.has(v.name) ? init.get(v.name) : 0)}`).join(", ")}}`);
+    wbInit = initFunction(model, nm, lets);
   }
   fields.push(`model = [${model.equations.map(q => `"${printAst(q.expr, nm.equation)}"`).join(";\n    ")}]`);
 
@@ -113,8 +140,8 @@ export function modelSource(model, opt = {}) {
   }
   if (opt.sd) fields.splice(3, 0, `sd = {${model.exo.map((s, j) => `${c(s.name)} = ${cozyNum(opt.sd[j])}`).join(", ")}}`);
   const spec = `{\n  ${fields.join(",\n  ")}}`;
-  const src = `let wb_m = dsge.model(${spec});\n${wbPar}\n${wbSs}\n`;
-  return { src, spec, pnames, steadyKind };
+  const src = `let wb_m = dsge.model(${spec});\n${wbPar}\n${wbSs}\n${wbInit}`;
+  return { src, spec, pnames, steadyKind, initFollows: wbInit !== "" };
 }
 
 /* The first line of a Cozy error, without the position and the package's
@@ -144,19 +171,27 @@ export class Workbench {
     const r = await this.engine.exec({ src: m.src });
     if (!r.ok) throw new Error(cozyMessage(r.output));
     this.model = model;
+    this.lastSteady = false;
     this.pnames = m.pnames;
     this.steadyKind = m.steadyKind;
+    this.initFollows = m.initFollows;
     this.source = m.src;
     return m;
   }
 
   /* The source for one solve: base values in, the decision rule out. */
-  solveSource(values, shocks) {
+  solveSource(values, shocks, fromFormulas = this.initFollows) {
     const model = this.model, c = name => model.cozy.get(name) || name;
     const base = model.params.filter(p => p.base).map(p => `${c(p.name)} = ${cozyNum(Object.hasOwn(values, p.name) ? values[p.name] : p.value)}`);
     const sd = shocks ? shocks.sd : model.shocks.sd, corr = shocks ? shocks.corr : model.shocks.corr;
+    /* where the steady-state search starts: initval's formulas at these parameter values if it
+     * has any (and they give real, finite numbers), otherwise the last steady state found */
+    const start = fromFormulas
+      ? `let wb_i = wb_init(dg_params(wb_m, wb_par(wb_b)));
+if all(isfinite(real(wb_i))) && (sum(abs(imag(wb_i))) == 0.0) then (wb_m = setfield(wb_m, "init", real(wb_i))) end;\n`
+      : "";
     return `let wb_b = {${base.join(", ")}};
-let wb_p = wb_ss(wb_m, dg_params(wb_m, wb_par(wb_b)));
+${start}let wb_p = wb_ss(wb_m, dg_params(wb_m, wb_par(wb_b)));
 let wb_r = wb_solve(wb_m, wb_p);
 let wb_code = wb_r.code; let wb_y = wb_r.y; let wb_roots = wb_r.roots; let wb_counts = wb_r.counts;
 let wb_pv = [${this.pnames.map(n => `wb_p.${c(n)}`).join(", ")}];
@@ -171,7 +206,13 @@ let wb_R = [${corr.map(row => row.map(cozyNum).join(", ")).join("; ")}];
   async solve(values = {}, options = {}) {
     const model = this.model, horizon = options.horizon || model.hints.irf || 40, lags = options.lags || 5;
     const t0 = Date.now();
-    const first = await this.engine.exec({ src: this.solveSource(values, options.shocks), read: ["wb_code", "wb_y", "wb_roots", "wb_counts", "wb_pv"] });
+    const read = ["wb_code", "wb_y", "wb_roots", "wb_counts", "wb_pv"];
+    let first = await this.engine.exec({ src: this.solveSource(values, options.shocks), read });
+    if (!first.ok && this.initFollows && this.lastSteady) {
+      /* the formulas were no good here: try from the last steady state found, as for any other model */
+      const again = await this.engine.exec({ src: `let wb_m = setfield(wb_m, "init", wb_last);\n` + this.solveSource(values, options.shocks, false), read });
+      if (again.ok) first = again;
+    }
     if (!first.ok) return { ok: false, error: cozyMessage(first.output), ms: Date.now() - t0 };
     const v = first.values, code = v.wb_code.data[0], n = model.endo.length, k = model.exo.length;
     const [forward, backward, stable] = v.wb_counts.data;
@@ -186,7 +227,8 @@ let wb_R = [${corr.map(row => row.map(cozyNum).join(", ")).join("; ")}];
     };
     if (code !== 0) { out.ms = Date.now() - t0; return out; }
     /* remember the steady state as the next search's starting point */
-    const warm = this.steadyKind === "search" ? `let wb_m = setfield(wb_m, "init", wb_y);` : "";
+    const warm = this.steadyKind === "search" ? `let wb_m = setfield(wb_m, "init", wb_y); let wb_last = wb_y;` : "";
+    if (warm) this.lastSteady = true;
     const second = await this.engine.exec({
       src: `${warm}
 let wb_P = wb_r.P; let wb_Q = wb_r.Q;

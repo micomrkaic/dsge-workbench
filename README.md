@@ -12,8 +12,10 @@ nothing leaves your machine.
 
 ![Impulse responses of an RBC model, with a pinned baseline](docs/img/responses.png)
 
-Its numbers are checked against Dynare 6.0 on six models, from a small RBC
-to Smets and Wouters (2007), and agree to better than one part in a billion
+Its numbers are checked against Dynare 6.0 on eight models, from the
+stochastic growth model to Smets and Wouters (2007). On seven they agree to
+better than one part in a billion; on the eighth to one part in a million,
+and there the workbench is the more accurate of the two
 ([Validation](#validation)).
 
 ## What it does
@@ -23,7 +25,9 @@ to Smets and Wouters (2007), and agree to better than one part in a billion
   length, `steady_state()`, `initval`, `steady_state_model`, the `shocks`
   block with variances, covariances and correlations,
   `predetermined_variables`, and the `@#define` / `@#if` macro directives.
-  Dynare's own example files load unmodified.
+  Dynare's own example files load unmodified. An `initval` block written
+  as formulas in the parameters is evaluated again when a parameter moves,
+  as it is when Dynare runs the file again.
 - **Says what it did not use.** Commands such as `estimation` and MATLAB
   statements are passed over and listed under the editor. Anything that
   would change the model's meaning and is not supported (optimal policy,
@@ -78,10 +82,12 @@ workbench, in the same WebAssembly the browser loads, and compare:
 | Model | Variables | Shocks | Largest relative difference |
 |---|---:|---:|---:|
 | Real business cycles (`rbc.mod`) | 8 | 1 | 1.0e-10 |
+| Stochastic growth model (`growth.mod`) | 5 | 1 | 5.0e-11 |
 | New Keynesian, three equations (`nk.mod`) | 6 | 2 | 8.3e-14 |
 | Collard's RBC (Dynare `example1.mod`), correlated shocks | 6 | 2 | 6.9e-11 |
 | Schorfheide (2000) (Dynare `fs2000.mod`), leads of two periods | 14 | 2 | 2.0e-10 |
 | Galí (2015), baseline New Keynesian, with a unit root | 14 | 3 | 8.0e-10 |
+| Fernández-Villaverde (2010), baseline New Keynesian (Dynare `NK_baseline.mod`) | 28 | 5 | 9.5e-7 |
 | Smets and Wouters (2007) | 40 | 7 | 2.7e-11 |
 
 The comparison covers the steady state, the decision rule, the eigenvalues,
@@ -91,10 +97,31 @@ difference is measured relative to the size of the quantity; the test fails
 above 1e-6. Where Dynare reports no variance (a unit root), the workbench
 must report none too.
 
-One thing the comparison brought out: Dynare's default tolerance for a
-numerically computed steady state is about 6e-6, so the reference run asks
-for a tighter one. Without that, the largest difference in the table would
-be Dynare's own steady-state error.
+Two things the comparison brought out.
+
+Dynare's default tolerance for a numerically computed steady state is about
+6e-6, so the reference run asks for a tighter one. Without that, the
+largest difference in the table would be Dynare's own steady-state error.
+
+The one model that stands apart, Fernández-Villaverde's, is badly
+conditioned (habits of 0.97, almost costless capital utilisation), and
+there the two decision rules differ in the ninth digit. The 9.5e-7 is that
+difference showing in a correlation that is nearly zero (-0.00045, between
+investment and wage dispersion), where it is measured against a small
+number. A decision rule `y = P y(-1) + Q e` can be checked without a second
+opinion: it must satisfy the linearised model, `A P P + B P + C = 0`.
+`node tools/rule_residual.mjs` puts both rules into that equation:
+
+| Model | What the workbench's rule leaves | What Dynare's leaves |
+|---|---:|---:|
+| Fernández-Villaverde (2010) | 9.1e-13 | 6.1e-9 |
+| Smets and Wouters (2007) | 6.7e-16 | 7.1e-15 |
+| the other five it can compare | below 1e-15 | below 4e-15 |
+
+On every model the workbench's rule fits at least as tightly, and on the
+hard one by four orders of magnitude. (Solving that model's equation in
+50-digit arithmetic gives the same ranking: the workbench's rule is within
+1.3e-13 of the exact one, Dynare's within 1.6e-9.)
 
 ## Limits
 
@@ -116,13 +143,14 @@ be Dynare's own steady-state error.
 
 runs, with node 22 and nothing else installed:
 
-- the comparison with Dynare for the six models (`test/validate.test.mjs`);
-- 24 tests of the reader and the solver (`test/modfile.test.mjs`): each
+- the comparison with Dynare for the eight models (`test/validate.test.mjs`);
+- 25 tests of the reader and the solver (`test/modfile.test.mjs`): each
   supported construct, operator precedence, error messages and their line
   numbers, auxiliary variables, correlated shocks, the Taylor principle,
-  unit roots, a wrong `steady_state_model`.
+  unit roots, a wrong `steady_state_model`, starting values that follow the
+  parameters.
 
-The page itself is driven in Chromium by `test/browser.mjs` (39 checks:
+The page itself is driven in Chromium by `test/browser.mjs` (42 checks:
 every tab, sliders, the pinned baseline, hover readouts, downloads, the
 share link, a file opened from disk, both themes, a phone-width screen):
 
@@ -143,7 +171,8 @@ share link, a file opened from disk, both themes, a phone-width screen):
       vendor/cozy-engine.js Cozy and its dsge package, as WebAssembly
       examples/             the bundled models
     test/                   tests, and Dynare's reference results
-    tools/                  build the engine, run Dynare, write the validation table
+    tools/                  build the engine, run Dynare, write the validation table,
+                            check each decision rule against the model
 
 To run it locally, serve `docs/` over HTTP (a worker cannot start from a
 `file://` page):

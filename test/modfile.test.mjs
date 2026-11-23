@@ -274,6 +274,34 @@ test("steady_state_model gives the steady state by formula; a wrong one is refus
   assert.match(wrong.error, /steady function does not solve the model/);
 });
 
+test("an initval block written as formulas follows the parameters", async () => {
+  // a Solow model: the block is its steady state in closed form
+  const solow = init => `var k y; varexo e; parameters alpha delta s; alpha = 0.3; delta = 0.1; s = 0.2;
+model; k = (1 - delta) * k(-1) + s * y; y = exp(e) * k(-1)^alpha; end;
+initval; ${init} end;
+shocks; var e; stderr 0.01; end;`;
+  const kstar = (s, delta) => (s / delta) ** (1 / 0.7);
+  const wb = new Workbench(engine);
+  const m = await wb.load(good(solow("k = (s / delta)^(1 / (1 - alpha)); y = k^alpha;")).model);
+  assert.ok(m.initFollows && /let wb_init = fn/.test(m.src));
+  // far from the values in the file, where a search from the old steady state would have a long way to go
+  for (const [s, delta] of [[0.2, 0.1], [0.9, 0.001], [0.01, 0.9]]) {
+    const r = await wb.solve({ s, delta });
+    assert.ok(r.ok, r.error);
+    assert.ok(Math.abs(r.steady[0] / kstar(s, delta) - 1) < 1e-12, `k = ${r.steady[0]} at s = ${s}, delta = ${delta}`);
+  }
+  // numbers only: nothing to follow, the search starts from the last steady state as before
+  const plain = await new Workbench(engine).load(good(solow("k = 2.7; y = 1.3;")).model);
+  assert.ok(!plain.initFollows && !/wb_init/.test(plain.src));
+  // a formula that stops being a real number at other parameter values is set aside, not an error
+  const wb2 = new Workbench(engine);
+  await wb2.load(good(solow("k = (s / delta)^(1 / (1 - alpha)) + 1e-12 * log(2.5 - s / delta); y = k^alpha;")).model);
+  assert.ok((await wb2.solve({})).ok);
+  const r = await wb2.solve({ s: 0.3 });
+  assert.ok(r.ok, r.error);
+  assert.ok(Math.abs(r.steady[0] / kstar(0.3, 0.1) - 1) < 1e-10);
+});
+
 test("a model with no steady state near its starting values reports that", async () => {
   const r = await solve(`var x; varexo e; model; exp(x) = -1 + 0 * x(-1) + e; end; initval; x = 0; end; shocks; var e; stderr 1; end;`);
   assert.equal(r.ok, false);

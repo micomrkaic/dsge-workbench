@@ -134,6 +134,15 @@ check(/12 unstable roots for 12 forward-looking/.test(await status()), "Smets an
 await tab("Variance");
 check((await page.$$("#view svg.chart rect.seg")).length > 30, "its variance decomposition is drawn");
 await shot("smets-wouters-variance");
+await page.selectOption("#example", "NK_baseline.mod");
+await page.waitForTimeout(800); await settled();
+check(/Unique stable solution/.test(await status()) && (await page.$$(".param")).length === 33, "the 28-variable New Keynesian model solves, with sliders for its 28 free parameters and 5 shocks", await status());
+await page.fill('.param:has(.param-name:text-is("betta")) input[type=number]', "0.9");
+await page.waitForTimeout(600); await settled();
+check(/Unique stable solution/.test(await status()), "... and again after a parameter is typed far from its value: the starting values follow", await status());
+await page.selectOption("#example", "growth.mod");
+await page.waitForTimeout(600); await settled();
+check(/Unique stable solution/.test(await status()), "the growth model solves", await status());
 await page.setInputFiles("#file", { name: "mine.mod", mimeType: "text/plain", buffer: Buffer.from("var x; varexo e; parameters rho; rho = 0.7;\nmodel; x = rho * x(-1) + e; end;\nshocks; var e; stderr 1; end;\n") });
 await page.waitForTimeout(600); await settled();
 check(/Unique stable solution/.test(await status()) && /3 lines|4 lines/.test(await page.textContent("#model-size")), "a .mod file opened from disk is solved");
@@ -144,7 +153,7 @@ check(await page.evaluate(() => document.documentElement.dataset.theme) === "dar
 await page.click("#theme");
 await page.click("#about-open");
 await page.waitForSelector("#validation tbody tr");
-check((await page.$$("#validation tbody tr")).length === 6, "the about box lists the six models checked against Dynare");
+check((await page.$$("#validation tbody tr")).length === 8, "the about box lists the eight models checked against Dynare");
 await shot("about");
 await page.click("#about form button");
 await page.setViewportSize({ width: 390, height: 800 });
