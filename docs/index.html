@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSGE Workbench</title>
+<meta name="description" content="Solve and explore DSGE models in the browser. Paste a model in Dynare's notation; get the steady state, the Blanchard-Kahn check, impulse responses, moments and a variance decomposition. Validated against Dynare 6.0.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M5 21 C10 21 10 9 15 9 S21 23 27 15' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./" aria-label="DSGE Workbench">
+    <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--series-1)"/><path d="M5 21 C10 21 10 9 15 9 S21 23 27 15" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>
+    <span>DSGE Workbench</span>
+  </a>
+  <label class="pick"><span class="sr">Example model</span>
+    <select id="example" title="Load an example model"></select>
+  </label>
+  <button id="open" type="button" title="Open a .mod file from your computer">Open…</button>
+  <input id="file" type="file" accept=".mod,.txt,text/plain" hidden>
+  <button id="save" type="button" title="Save the model as a .mod file">Save</button>
+  <button id="share" type="button" title="Copy a link that opens this model with these parameter values">Copy link</button>
+  <span class="spacer"></span>
+  <button id="about-open" type="button" class="quiet">Validated against Dynare 6.0</button>
+  <button id="theme" type="button" class="quiet" title="Switch between light and dark">Dark</button>
+  <a class="quiet" href="https://github.com/micomrkaic/dsge-workbench">Source</a>
+</header>
+
+<main class="layout">
+  <section class="pane editor-pane" aria-label="Model">
+    <div class="pane-head">
+      <h2>Model</h2>
+      <span id="model-size" class="dim"></span>
+    </div>
+    <div class="editor" id="editor">
+      <div class="gutter" id="gutter" aria-hidden="true"></div>
+      <div class="code">
+        <pre id="paint" aria-hidden="true"></pre>
+        <textarea id="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Model in Dynare's notation"></textarea>
+      </div>
+    </div>
+    <div class="messages" id="messages" aria-live="polite"></div>
+  </section>
+
+  <section class="pane params-pane" aria-label="Parameters">
+    <div class="pane-head">
+      <h2>Parameters</h2>
+      <button id="reset" type="button" class="small" title="Put every parameter back to the value in the model">Reset</button>
+    </div>
+    <div id="params" class="params"></div>
+  </section>
+
+  <section class="pane results-pane" aria-label="Results">
+    <div class="status" id="status" aria-live="polite"></div>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div class="view" id="view" role="tabpanel"></div>
+  </section>
+</main>
+
+<dialog id="about">
+  <h2>What this is, and how it was checked</h2>
+  <p>The workbench reads a model written in the language of <a href="https://www.dynare.org">Dynare</a>, finds its steady state,
+  takes a first-order approximation around it with exact derivatives, checks the Blanchard–Kahn conditions and solves
+  for the decision rule. The numerical work is done by <a href="https://github.com/micomrkaic/cozy">Cozy</a>, a small
+  matrix language, and its <code>dsge</code> package, compiled to WebAssembly and running in this page. Nothing is sent
+  to a server.</p>
+  <p>Each example model was also solved by Dynare 6.0. The workbench's steady state, decision rule, eigenvalues, impulse
+  responses, standard deviations, correlations, autocorrelations and variance decomposition agree with Dynare's to
+  better than one part in a billion; the comparison runs on every change to the code.</p>
+  <table class="grid" id="validation"></table>
+  <p><strong>Limits.</strong> First-order solutions only; no estimation, no occasionally binding constraints, no optimal
+  policy. Moments are those of the unfiltered model. Statements the workbench does not use are listed under the editor
+  instead of being silently dropped.</p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

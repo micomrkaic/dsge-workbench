@@ -1,0 +1,30 @@
+DSGE Workbench
+Copyright (C) 2026 Mico Mrkaic. GPL-3.0-or-later.
+
+This repository includes work by others:
+
+docs/vendor/cozy-engine.js
+    The Cozy interpreter and its dsge package, compiled to WebAssembly.
+    Copyright (C) Mico Mrkaic. GPL-3.0-or-later.
+    https://github.com/micomrkaic/cozy
+
+docs/examples/example1.mod
+docs/examples/fs2000.mod
+    From the examples distributed with Dynare 6.0, unmodified.
+    Copyright (C) Dynare Team. GPL-3.0-or-later. https://www.dynare.org
+
+docs/examples/Gali_2015.mod
+    From the examples distributed with Dynare 6.0, written by Johannes
+    Pfeifer. Copyright (C) Dynare Team. GPL-3.0-or-later. Modified for the
+    workbench (the estimation part removed, shocks set); the file's header
+    says so.
+
+docs/examples/Smets_Wouters_2007.mod
+    Smets_Wouters_2007_45.mod from Johannes Pfeifer's DSGE_mod collection,
+    unmodified. Copyright (C) 2007-2013 Frank Smets and Raf Wouters,
+    (C) 2013-15 Johannes Pfeifer. GPL-3.0-or-later.
+    https://github.com/JohannesPfeifer/DSGE_mod
+
+test/reference/*.json
+    Results computed by Dynare 6.0 for the bundled models
+    (tools/dynare_reference.py).

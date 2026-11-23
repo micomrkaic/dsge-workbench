@@ -1,0 +1,36 @@
+# DSGE Workbench CI. The first job needs only node: it solves the bundled
+# models in the WebAssembly the site serves and compares with Dynare's saved
+# results, and tests the model reader. The second drives the page in Chromium.
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: reader, solver and validation against Dynare
+        run: npm test
+
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install Playwright and Chromium
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+      - name: drive the page in Chromium
+        run: |
+          python3 -m http.server -d docs 8767 &
+          sleep 1
+          node test/browser.mjs http://localhost:8767/

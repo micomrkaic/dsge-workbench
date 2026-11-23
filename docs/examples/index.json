@@ -1,0 +1,20 @@
+[
+  { "file": "rbc.mod", "title": "Real business cycles",
+    "about": "The RBC model with a choice of hours: one technology shock, eight variables. A good place to start.",
+    "source": "Written for the workbench.", "cut": "^stoch_simul" },
+  { "file": "nk.mod", "title": "New Keynesian, three equations",
+    "about": "Phillips curve, IS curve and a policy rule. Lower phi_pi below one and the equilibrium is no longer unique.",
+    "source": "Written for the workbench, after Gali (2015), ch. 3.", "cut": "^stoch_simul" },
+  { "file": "example1.mod", "title": "Collard's RBC (Dynare example1)",
+    "about": "A growth model with two correlated shocks, technology and preferences.",
+    "source": "Dynare 6.0, examples/example1.mod, unmodified.", "cut": "^stoch_simul" },
+  { "file": "fs2000.mod", "title": "Schorfheide (2000), cash in advance",
+    "about": "A monetary model with money growth and technology shocks, leads of two periods and a closed-form steady state.",
+    "source": "Dynare 6.0, examples/fs2000.mod, unmodified; its estimation commands are passed over.", "cut": "^steady;" },
+  { "file": "Gali_2015.mod", "title": "Gali (2015), baseline New Keynesian",
+    "about": "The textbook model in full: fourteen variables, three shocks, and a price level with a unit root.",
+    "source": "Model block from Dynare 6.0, examples/Gali_2015.mod (Johannes Pfeifer); estimation part removed, shocks set.", "cut": "^stoch_simul" },
+  { "file": "Smets_Wouters_2007.mod", "title": "Smets and Wouters (2007)",
+    "about": "The medium-scale model of the US economy: forty variables, seven shocks, sticky prices and wages, at the posterior mode.",
+    "source": "Johannes Pfeifer's DSGE_mod collection, Smets_Wouters_2007_45.mod, unmodified; its estimation commands are passed over.", "cut": "^estimated_params;" }
+]

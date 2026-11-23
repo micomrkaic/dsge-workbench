@@ -1,0 +1,6 @@
+{
+  "name": "dsge-workbench",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "scripts": { "test": "node --test test/*.test.mjs" }
+}
