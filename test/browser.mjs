@@ -127,6 +127,60 @@ await second.waitForFunction(() => document.querySelector("#status .badge.good")
 check(await second.inputValue('.param:has(.param-name:text-is("rho")) input[type=number]') === "0.8", "opening the link restores the model and the moved parameter");
 await second.close();
 
+// --- second order
+await page.selectOption("#example", "growth.mod");
+await page.waitForTimeout(600); await settled();
+await page.click('#status .order button:text-is("2nd order")');
+await page.waitForTimeout(500); await settled();
+check(/second order, solved in/.test(await status()) && await page.$eval('#status .order button.on', e => e.textContent) === "2nd order", "the order switch solves the model to second order", await status());
+await tab("Summary");
+check(/Mean, second order/.test(await page.textContent("#view table.grid thead")), "the summary sets the second-order mean beside the steady state");
+const kRow = await page.$$eval("#view table.grid tbody tr", rows => rows.map(r => [...r.cells].map(c => c.textContent)).find(c => c[0] === "k"));
+check(kRow && parseFloat(kRow[4]) > 0, "risk raises mean capital", kRow ? kRow.join(" | ") : "");
+await tab("Impulse responses");
+check(/second order/.test(await page.textContent("#view .legend")) && /first order/.test(await page.textContent("#view .legend")), "responses are drawn to second order against the first-order ones");
+const cPath = () => page.$eval('.card[data-name="c"] svg.chart', s => [...s.querySelectorAll("path")].map(p => p.getAttribute("d")).join(" "));
+const atOne = await cPath();
+await page.fill('input[aria-label="Shock size in standard deviations"]', "-8");
+await page.keyboard.press("Tab");
+await page.waitForTimeout(600); await settled();
+check(await cPath() !== atOne && /innovation of −?-?8 standard deviations/.test(await page.textContent("#view .foot")), "the size and sign of the shock can be chosen", (await page.textContent("#view .foot")).slice(0, 90));
+await shot("second-order-irf");
+await tab("Moments");
+check(/Steady state/.test(await page.textContent("#view table.grid thead")) && /The mean is to second order/.test(await page.textContent("#view")), "the moments report the second-order mean and say what the variances are");
+await tab("Simulation");
+await page.waitForTimeout(500);
+const simPath = () => page.$eval("#view svg.chart", s => [...s.querySelectorAll("path")].map(p => p.getAttribute("d")).join(" "));
+const total = await simPath();
+await page.click('#view .seg button:text-is("Difference")');
+await page.waitForTimeout(500);
+check(await simPath() !== total && /second-order path less the first-order path/.test(await page.textContent("#view .foot")), "the simulation shows the pruned path, the first-order path, or their difference");
+await page.click('#view .seg button:text-is("Second order")');
+await page.waitForTimeout(300);
+await tab("Decision rule");
+check(/Second-order terms/.test(await page.textContent("#view")) && (await page.$$eval("#view table.grid", t => t.length)) === 2 &&
+  /k\(-1\) × a\(-1\)/.test(await page.textContent("#view")) && /Risk/.test(await page.textContent("#view")), "the decision rule lists the second-order terms, each product once");
+await grab(() => page.click('#view h3 ~ .bar button:text-is("CSV")'), "the second-order terms download as CSV", (b, n) => n === "growth-decision-rule-second-order.csv" && /e × e/.test(b));
+await tab("Cozy script");
+check(/dsge\.solve2\(m\)/.test(await page.textContent("#view pre.source")), "the Cozy script solves to second order too");
+await page.click("#share");
+await page.waitForTimeout(400);
+const link2 = page.url();
+const third = await context.newPage();
+await third.goto(link2);
+await third.waitForFunction(() => document.querySelector("#status .badge.good"), null, { timeout: 30000 });
+check(await third.$eval('#status .order button.on', e => e.textContent) === "2nd order", "a link carries the order of approximation");
+await third.close();
+await page.selectOption("#example", "nk.mod");
+await page.waitForTimeout(600); await settled();
+check(await page.$eval('#status .order button:text-is("2nd order")', e => e.disabled) && !/second order/.test(await status()), "a model declared linear stays at first order, and the switch says why");
+await page.selectOption("#example", "NK_baseline.mod");
+await page.waitForTimeout(1200); await settled();
+check(/Unique stable solution/.test(await status()) && /second order, solved in/.test(await status()), "the 28-variable model solves to second order", await status());
+await page.click('#status .order button:text-is("1st order")');
+await page.waitForTimeout(500); await settled();
+check(!/second order/.test(await status()), "... and back to first");
+
 // --- a large model, and a file opened from disk
 await page.selectOption("#example", "Smets_Wouters_2007.mod");
 await page.waitForTimeout(800); await settled();

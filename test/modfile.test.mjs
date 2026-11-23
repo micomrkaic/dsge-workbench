@@ -2,6 +2,7 @@
 // models that are not well behaved.
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { parseMod, evalAst, printAst } from "../docs/js/modfile.js";
 import { Workbench, modelSource, cozyNum } from "../docs/js/solve.js";
 import { startEngine } from "./engine-node.mjs";
@@ -220,6 +221,90 @@ test("names that Cozy reserves are renamed on the way in and back on the way out
   const r = await solve(text);
   assert.deepEqual(r.names, ["in", "end"]);
   assert.equal(r.P[0][0], 0.5);
+});
+
+test("a lead of two periods takes its whole nonlinear term into the auxiliary variable", async () => {
+  // Dynare's rule: through sums, and through products with what is known today; otherwise the term itself
+  const model = body => `var x y z; varexo e; parameters a b; a = 0.4; b = 0.2;
+    model; ${body} y = b * y(-1) + e; z = a * z(-1) + b * y; end;
+    initval; x = 1; y = 0; z = 0; end;
+    shocks; var e; stderr 0.1; end;`;
+  const show = m => m.endo.filter(v => v.aux).map(v => `${v.name} = ${printAst(v.def, n => n.name + (n.shift ? `(${n.shift > 0 ? "+" : ""}${n.shift})` : ""))}`);
+  // alone, times a parameter, times a variable dated today: the variable is enough
+  assert.deepEqual(show(good(model("x = 1 + a * y(+2) + z * y(+2) - y(+2) / (1 + z(-1));")).model), ["y_LEAD1 = y(+1)"]);
+  // inside a function, a power, or under a division: the term
+  assert.deepEqual(show(good(model("x = exp(y(+2)) + 1 / (1 + y(+2));")).model), ["AUX_LEAD_1 = exp(y(+1))", "AUX_LEAD_2 = 1 / (1 + y(+1))"]);
+  // a product of two things not yet known is one expectation, not two
+  assert.deepEqual(show(good(model("x = 1 + y(+2) * z(+1);")).model), ["AUX_LEAD_1 = y(+1) * z"]);
+  assert.deepEqual(show(good(model("x = 1 + y(+2) * z(+2);")).model), ["AUX_LEAD_1 = y(+1) * z(+1)"]);
+  // the same term twice is one variable; three periods ahead is a chain, and shares its first link
+  assert.deepEqual(show(good(model("x = exp(y(+2)) + 2 * exp(y(+2)) + exp(y(+3));")).model), ["AUX_LEAD_1 = exp(y(+1))", "AUX_LEAD_2 = AUX_LEAD_1(+1)"]);
+  assert.deepEqual(show(good(model("x = 1 + y(+2) + y(+3);")).model), ["y_LEAD1 = y(+1)", "y_LEAD2 = y_LEAD1(+1)"]);
+  // a term moved back a period may hold a longer lag, which gets its own variable (and comes first)
+  assert.deepEqual(show(good(model("x = 1 + exp(y(+2) + z(-1));")).model), ["z_LAG1 = z(-1)", "AUX_LEAD_1 = exp(y(+1) + z_LAG1(-1))"]);
+  // ... but a lagged factor is known today, and the walk passes it by
+  assert.deepEqual(show(good(model("x = 1 + y(+2) * exp(z(-1));")).model), ["y_LEAD1 = y(+1)"]);
+
+  // the auxiliary variable is the expectation of the term: to first order x responds as the term does
+  const text = model("x = 1 + exp(y(+2));");
+  const r = await solve(text, {}, { horizon: 6 });
+  assert.equal(r.verdict, "determinate");
+  const i = r.names.indexOf("AUX_LEAD_1");
+  assert.ok(Math.abs(r.steady[i] - 1) < 1e-14 && Math.abs(r.steady[0] - 2) < 1e-14, "the variable's steady state is the term's");
+  assert.ok(Math.abs(r.Q[0][0] - 0.2 * 0.2) < 1e-14, "x moves with the shock two periods on: b^2");
+  // ... and to second order its mean has the term's curvature: E exp(y) is not exp(E y)
+  const r2 = await solve(text, {}, { order: 2 });
+  const vary = 0.01 / (1 - 0.04);
+  assert.ok(Math.abs(r2.second.mean[0] - vary / 2) < 1e-12, `the mean of x rises by half the variance of y (${r2.second.mean[0]} against ${vary / 2})`);
+});
+
+test("second order: means, responses that depend on size and sign, pruned paths", async () => {
+  const text = fs.readFileSync(new URL("../docs/examples/growth.mod", import.meta.url), "utf8");
+  const wb = new Workbench(engine);
+  await wb.load(good(text).model);
+  const one = await wb.solve({});
+  assert.ok(!one.second && one.order === 1);
+  await assert.rejects(() => wb.path2([[0.01]]), /second-order/);
+  const r = await wb.solve({}, { order: 2, size: 3 });
+  assert.ok(r.ok && r.order === 2);
+  const s = r.second, k = r.names.indexOf("k"), c = r.names.indexOf("c");
+  assert.deepEqual(s.states, ["k", "a"]);
+  assert.deepEqual([s.Gxx.length, s.Gxx[0].length, s.Gxu[0].length, s.Guu[0].length, s.s2.length], [5, 4, 2, 1, 5]);
+  assert.ok(s.mean[k] > 0, "risk raises mean capital: precautionary saving");
+  assert.ok(r.irf.flat(2).every((v, q) => Math.abs(v - one.irf.flat(2)[q]) < 1e-15), "the first-order results are the first-order results");
+  // a response to three standard deviations is not three times the response to one, nor the mirror of minus three
+  const down = (await wb.solve({}, { order: 2, size: -3 })).second;
+  const up0 = s.irf[0][0][c], down0 = down.irf[0][0][c], lin = 3 * r.irf[0][0][c];
+  assert.ok(up0 > lin && down0 > -lin && Math.abs(up0 + down0) > 1e-6, `consumption: ${up0} up, ${down0} down, ${lin} if linear`);
+  assert.ok(Math.abs((up0 + down0) / 2 - 0.5 * s.Guu[c][0] * (3 * 0.01) ** 2) < 1e-15, "the asymmetry on impact is the shock's own curvature term");
+  // the same draws to both orders
+  const first = await wb.simulate(60, 4), both = await wb.simulate(60, 4, true);
+  assert.ok(both.first.every((row, t) => row.every((v, i) => Math.abs(v - first[t][i]) < 1e-14)), "its first-order part is the first-order path");
+  assert.ok(both.second.some(row => Math.abs(row[k]) > 1e-6), "the second-order correction is not zero");
+  const again = await wb.simulate(60, 4, true);
+  assert.deepEqual(again.second.map(row => Array.from(row)), both.second.map(row => Array.from(row)), "the same seed gives the same path");
+  // with no shocks the pruned path drifts from the steady state towards the mean risk gives it
+  const still = await wb.path2(Array.from({ length: 3 }, () => [0]));
+  assert.ok(still.first.flat().every(v => v === 0) && Math.abs(still.second[0][k] - 0.5 * s.s2[k]) < 1e-18);
+});
+
+test("second order where there is nothing to add, and where there is no mean", async () => {
+  // declared linear: not computed, all zero, responses just scale
+  const lin = await solve(NK, {}, { order: 2, size: 2 });
+  assert.ok(lin.second.linear && lin.second.s2.every(v => v === 0) && lin.second.Gxx.flat().every(v => v === 0));
+  assert.ok(Math.abs(lin.second.irf[0][0][0] - 2 * lin.irf[0][0][0]) < 1e-15);
+  // linear without saying so: computed, and found to be zero
+  const ar = await solve(AR1, {}, { order: 2 });
+  assert.ok(!ar.second.linear && ar.second.Gxx[0][0] === 0 && ar.second.Guu[0][0] === 0 && ar.second.mean[0] === 0);
+  // a unit root has no mean; a curved function of a stationary variable has one beside it
+  const r = await solve(`var p pi w; varexo e; parameters rho; rho = 0.5;
+    model; p = p(-1) + pi; pi = rho * pi(-1) + e; w = exp(pi) - 1; end;
+    initval; p = 0; pi = 0; w = 0; end;
+    shocks; var e; stderr 0.1; end;`, {}, { order: 2 });
+  assert.ok(r.ok, r.error);
+  assert.ok(Number.isNaN(r.second.mean[0]), "the price level has no mean");
+  assert.equal(r.second.mean[1], 0);
+  assert.ok(Math.abs(r.second.mean[2] - 0.5 * 0.01 / (1 - 0.25)) < 1e-14, "E[exp(pi) - 1] is half the variance of pi");
 });
 
 test("the Taylor principle: the verdict is a result, not an error", async () => {

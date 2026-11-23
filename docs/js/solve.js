@@ -40,11 +40,18 @@ function startingValues(model, values) {
   for (const a of model.init) init.set(a.name, evalAst(a.expr, env));
   for (const v of model.endo) {
     if (!v.aux) continue;
-    const src = v.def.t === "var" ? v.def.name : null;       /* an auxiliary variable starts where its source does */
-    if (src === null) init.set(v.name, 0);
-    else if (init.has(src)) init.set(v.name, init.get(src));
+    const x = evalAst(v.def, env);                           /* an auxiliary variable starts at what it stands for */
+    init.set(v.name, Number.isFinite(x) ? x : 0);
   }
   return init;
+}
+
+/* The auxiliary variables at a steady state, as Cozy lets: each is what it
+ * stands for with the dates dropped and the shocks at zero. They come in an
+ * order in which each uses only those before it. */
+function auxValues(model, nm) {
+  const still = n => (n.t === "exo" ? "0.0" : nm.c(n.name));
+  return model.endo.filter(v => v.aux).map(v => `let ${nm.c(v.name)} = ${printAst(v.def, still)};`).join(" ");
 }
 
 /* An initval block written as formulas in the parameters, as a Cozy
@@ -63,14 +70,10 @@ function initFunction(model, nm, lets) {
     assigned.add(a.name);
   }
   if (!follows) return "";
+  for (const v of model.endo) if (!v.aux && !assigned.has(v.name)) other.add(v.name);
   const zeros = [...other].map(name => `let ${c(name)} = 0.0;`).join(" ");
   const body = model.init.map(a => `let ${c(a.name)} = ${printAst(a.expr, nm.value)};`).join(" ");
-  const out = model.endo.map(v => {
-    let root = v.name;
-    while (root && model.endo.find(u => u.name === root).aux) { const d = model.endo.find(u => u.name === root).def; root = d.t === "var" ? d.name : null; }
-    return root && assigned.has(root) ? `1.0 * ${c(root)}` : "0.0";
-  });
-  return `let wb_init = fn p__ -> (${lets} ${zeros} ${body} [${out.join("; ")}]);\n`;
+  return `let wb_init = fn p__ -> (${lets} ${zeros} ${body} ${auxValues(model, nm)} [${model.endo.map(v => `1.0 * ${c(v.name)}`).join("; ")}]);\n`;
 }
 
 /* Is the model satisfied with every variable at zero? (True of a linear
@@ -104,14 +107,8 @@ export function modelSource(model, opt = {}) {
   if (model.steady) {
     const assigned = new Set(model.steady.lines.map(a => a.name));
     const body = model.steady.lines.map(a => `let ${c(a.name)} = ${printAst(a.expr, nm.value)};`).join(" ");
-    const out = model.endo.map(v => {
-      if (!v.aux) return `${c(v.name)} = ${assigned.has(v.name) ? c(v.name) : "0.0"}`;
-      /* follow a chain of auxiliary variables back to the variable it shifts (none for a shock) */
-      let root = v.def.t === "var" ? v.def.name : null;
-      while (root && model.endo.find(u => u.name === root).aux) { const d = model.endo.find(u => u.name === root).def; root = d.t === "var" ? d.name : null; }
-      return `${c(v.name)} = ${root && assigned.has(root) ? c(root) : "0.0"}`;
-    });
-    fields.push(`steady = fn p__ -> (${lets} ${body} {${out.join(", ")}})`);
+    const unset = model.endo.filter(v => !v.aux && !assigned.has(v.name)).map(v => `let ${c(v.name)} = 0.0;`).join(" ");
+    fields.push(`steady = fn p__ -> (${lets} ${body} ${unset} ${auxValues(model, nm)} {${model.endo.map(v => `${c(v.name)} = ${c(v.name)}`).join(", ")}})`);
     steadyKind = "formula";
   } else if (model.linear && zeroSteadyState(model, values)) {
     fields.push(`steady = fn p__ -> {${model.endo.map(v => `${c(v.name)} = 0.0`).join(", ")}}`);
@@ -205,6 +202,7 @@ let wb_R = [${corr.map(row => row.map(cozyNum).join(", ")).join("; ")}];
    * stable solution is a result, not an error. */
   async solve(values = {}, options = {}) {
     const model = this.model, horizon = options.horizon || model.hints.irf || 40, lags = options.lags || 5;
+    const order = options.order === 2 ? 2 : 1, size = Number.isFinite(options.size) && options.size !== 0 ? options.size : 1;
     const t0 = Date.now();
     const read = ["wb_code", "wb_y", "wb_roots", "wb_counts", "wb_pv"];
     let first = await this.engine.exec({ src: this.solveSource(values, options.shocks), read });
@@ -223,7 +221,7 @@ let wb_R = [${corr.map(row => row.map(cozyNum).join(", ")).join("; ")}];
       steady: v.wb_y.data,
       params: Object.fromEntries(this.pnames.map((name, i) => [name, v.wb_pv.data[i]])),
       names: model.endo.map(u => u.name), shocks: model.exo.map(s => s.name),
-      horizon, lags,
+      horizon, lags, order,
     };
     if (code !== 0) { out.ms = Date.now() - t0; return out; }
     /* remember the steady state as the next search's starting point */
@@ -253,16 +251,94 @@ let wb_vd = wb_vardecomp(wb_P, wb_C);
     out.corr = matrix(w.wb_co);
     out.acorr = matrix(w.wb_ac);
     out.vardecomp = k ? matrix(w.wb_vd) : [];
+    this.second = false;
+    if (order === 2) {
+      const s2 = await this.secondOrder(out, size);
+      if (s2.error) return { ok: false, error: s2.error, ms: Date.now() - t0 };
+      out.second = s2;
+    }
     out.ms = Date.now() - t0;
     return out;
   }
 
-  /* A simulated path of T periods (deviations from the steady state). */
-  async simulate(T, seed) {
-    const r = await this.engine.exec({ src: `let wb_S = wb_simulate(wb_P, wb_C, ${T | 0}, ${seed | 0});`, read: ["wb_S"] });
+  /* The second-order terms at the first-order solution just computed (first
+   * is its result). Returns {states, Gxx, Gxu, Guu, s2, mean, irf, size,
+   * linear}: the names of the state variables x; the terms of
+   *   y = ybar + P y(-1) + Q e + 1/2 [Gxx (x ⊗ x) + 2 Gxu (x ⊗ e) + Guu (e ⊗ e) + s2]
+   * as matrices with one row per variable; the means to second order as
+   * deviations from the steady state (NaN where there is none); and the
+   * responses to innovations of `size` standard deviations, shaped like the
+   * first-order irf. A model declared linear has no second-order terms: they
+   * are zero without being computed. */
+  async secondOrder(first, size) {
+    const model = this.model, n = model.endo.length, k = model.exo.length, horizon = first.horizon;
+    const matrix = m => Array.from({ length: m.rows }, (_, i) => m.data.slice(i * m.cols, (i + 1) * m.cols));
+    const lagged = new Set();
+    for (const q of model.equations) walkAst(q.expr, node => { if (node.t === "var" && node.shift < 0) lagged.add(node.name); });
+    const states = first.names.filter(name => lagged.has(name));
+    if (model.linear) {
+      const nx = states.length, zeros = cols => Array.from({ length: n }, () => new Array(cols).fill(0));
+      return { linear: true, states, size, Gxx: zeros(nx * nx), Gxu: zeros(nx * k), Guu: zeros(k * k), s2: new Array(n).fill(0),
+        mean: first.sd.map(s => (Number.isNaN(s) ? NaN : 0)), irf: first.irf.map(byT => byT.map(row => row.map(x => size * x))) };
+    }
+    const r = await this.engine.exec({
+      src: `let wb_S = (wb_sd * wb_sd') .* wb_R;
+let wb_g = dg_second(wb_m, wb_p, wb_y, wb_P, wb_Q, wb_S);
+let wb_s2 = {model = wb_m, ybar = wb_y, P = wb_P, Q = wb_Q, Gxx = wb_g.Gxx, Gxu = wb_g.Gxu, Guu = wb_g.Guu, s2 = wb_g.s2};
+let wb_Ce = (wb_sd * ones(1, ${k})) .* chol(wb_R);
+let wb_Gxx = wb_g.Gxx; let wb_Gxu = wb_g.Gxu; let wb_Guu = wb_g.Guu; let wb_gs2 = wb_g.s2; let wb_st = wb_g.st;
+let wb_mu2 = wb_mean2(wb_P, wb_C, wb_S, wb_g.st, wb_g.Gxx, wb_g.Guu, wb_g.s2);
+let wb_I2 = wb_irf2(wb_s2, wb_Ce, ${horizon}, ${cozyNum(size)});
+`,
+      read: ["wb_Gxx", "wb_Gxu", "wb_Guu", "wb_gs2", "wb_st", "wb_mu2", "wb_I2"],
+    });
+    if (!r.ok) return { error: cozyMessage(r.output) };
+    const w = r.values;
+    for (const [name, value] of Object.entries(w)) if (!value) return { error: `Cozy returned no numbers for ${name}` };
+    this.second = true;
+    const all = matrix(w.wb_I2);
+    return {
+      linear: false, size,
+      states: Array.from(w.wb_st.data, i => first.names[i - 1]),
+      Gxx: matrix(w.wb_Gxx), Gxu: matrix(w.wb_Gxu), Guu: matrix(w.wb_Guu), s2: Array.from(w.wb_gs2.data),
+      mean: Array.from(w.wb_mu2.data),
+      irf: model.exo.map((_, j) => all.slice(j * horizon, (j + 1) * horizon)),
+    };
+  }
+
+  /* The pruned second-order path for a given run of shocks (one row per
+   * period, in the shocks' own units), as deviations from the steady state:
+   * {first, second}, the first-order path and the correction to add to it.
+   * Needs a solve at order 2 of a model that is not linear. */
+  async path2(shocks) {
+    if (!this.second) throw new Error("path2 needs a second-order solution");
+    const r = await this.engine.exec({
+      src: `let wb_E = [${shocks.map(row => row.map(cozyNum).join(", ")).join("; ")}];
+let wb_pt = dg_path2(wb_s2, wb_E); let wb_Y1 = wb_pt.Y1; let wb_Y2 = wb_pt.Y2;`,
+      read: ["wb_Y1", "wb_Y2"],
+    });
     if (!r.ok) throw new Error(cozyMessage(r.output));
-    const m = r.values.wb_S;
-    return Array.from({ length: m.rows }, (_, i) => m.data.slice(i * m.cols, (i + 1) * m.cols));
+    const rows = m => Array.from({ length: m.rows }, (_, i) => Array.from(m.data.slice(i * m.cols, (i + 1) * m.cols)));
+    return { first: rows(r.values.wb_Y1), second: rows(r.values.wb_Y2) };
+  }
+
+  /* A simulated path of T periods (deviations from the steady state). After
+   * a solve at order 2 of a model that is not linear, pass second = true for
+   * the pruned second-order path of the same draws: the result is then
+   * {first, second}, the first-order path and the correction to add to it. */
+  async simulate(T, seed, second = false) {
+    if (second && this.second) {
+      const r = await this.engine.exec({ src: `let wb_sim2 = wb_simulate2(wb_s2, wb_Ce, ${T | 0}, ${seed | 0});`, read: ["wb_sim2"] });
+      if (!r.ok) throw new Error(cozyMessage(r.output));
+      const m = r.values.wb_sim2, n = m.cols / 2;
+      const rows = from => Array.from({ length: m.rows }, (_, i) => m.data.slice(i * m.cols + from, i * m.cols + from + n));
+      return { first: rows(0), second: rows(n) };
+    }
+    const r = await this.engine.exec({ src: `let wb_sim = wb_simulate(wb_P, wb_C, ${T | 0}, ${seed | 0});`, read: ["wb_sim"] });
+    if (!r.ok) throw new Error(cozyMessage(r.output));
+    const m = r.values.wb_sim;
+    const first = Array.from({ length: m.rows }, (_, i) => m.data.slice(i * m.cols, (i + 1) * m.cols));
+    return second ? { first, second: first.map(row => row.map(() => 0)) } : first;
   }
 }
 
@@ -286,9 +362,27 @@ export function standaloneScript(model, result, shocks, title) {
     `let b = dsge.bk(m);                 % the Blanchard-Kahn check`,
     `b.verdict`,
   ];
-  if (result.determinate) {
+  const s2 = result.determinate && result.second && !result.second.linear ? result.second : null;
+  if (s2) {
+    const z = s2.size;
+    lines.push(`let s = dsge.solve2(m);             % steady state, the rule y = P y(-1) + Q e, and its second-order terms`, `s.ss`);
+    if (first) lines.push(`dsge.irf2(s, "${c(first.name)}", ${Math.min(result.horizon, 20)}, ${cozyNum(z)})   % responses to second order to ${z} standard deviation${Math.abs(z) === 1 ? "" : "s"} of ${first.name}`);
+    if (correlated) {
+      const S = corr.map((row, i) => row.map((r, j) => cozyNum(r * sd[i] * sd[j])).join(", ")).join("; ");
+      lines.push(`% The shocks are correlated here, and dsge.solve2 takes them as independent. The curvature`,
+        `% terms above (s.Gxx, s.Gxu, s.Guu) do not depend on that; the correction for risk does. With`,
+        `% the shocks' covariance, as the workbench computes it:`,
+        `let S = [${S}];`,
+        `let g = dg_second(m, s.params, s.ybar, s.P, s.Q, S);`,
+        `g.s2'                               % half of this is the constant that risk adds to each variable`);
+      if (!unit) lines.push(`dg_mean2({model = m, ybar = s.ybar, P = s.P, Q = s.Q, Gxx = g.Gxx, Gxu = g.Gxu, Guu = g.Guu, s2 = g.s2}, S)'   % the means to second order`);
+    } else if (!unit) lines.push(`dsge.mean2(s)                       % the means to second order`);
+    lines.push(`% the moments below are those of the first-order solution`);
+  } else if (result.determinate) {
     lines.push(`let s = dsge.solve(m);              % steady state and decision rule y = P y(-1) + Q e`, `s.ss`);
     if (first) lines.push(`dsge.irf(s, "${c(first.name)}", ${Math.min(result.horizon, 20)})     % responses to one standard deviation of ${first.name}`);
+  }
+  if (result.determinate) {
     if (correlated) lines.push(`% The shocks are correlated here. The workbench orthogonalises them (Cholesky, in the order`, `% declared); dsge.irf and dsge.moments below treat them as independent.`);
     if (unit) lines.push(`% Some variables have a unit root, so the model has no unconditional moments:`, `% dsge.moments(s) and dsge.vardecomp(s) would say so.`);
     else lines.push(`dsge.moments(s).sd'`, model.exo.length > 1 ? `dsge.vardecomp(s)` : ``);

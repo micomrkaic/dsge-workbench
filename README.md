@@ -5,8 +5,8 @@
 Solve and explore DSGE models in a browser tab. Paste a model written in
 [Dynare](https://www.dynare.org)'s notation and get its steady state, the
 Blanchard–Kahn check, impulse responses, theoretical moments and a variance
-decomposition, recomputed as you drag a parameter. Nothing to install, and
-nothing leaves your machine.
+decomposition, recomputed as you drag a parameter, to first order or to
+second. Nothing to install, and nothing leaves your machine.
 
 **[Open the workbench](https://micomrkaic.github.io/dsge-workbench/)**
 
@@ -15,14 +15,17 @@ nothing leaves your machine.
 Its numbers are checked against Dynare 6.0 on eight models, from the
 stochastic growth model to Smets and Wouters (2007). On seven they agree to
 better than one part in a billion; on the eighth to one part in a million,
-and there the workbench is the more accurate of the two
+and there the workbench is the more accurate of the two. The second-order
+solutions agree with Dynare's `order=2` to nine digits or better
 ([Validation](#validation)).
 
 ## What it does
 
 - **Reads `.mod` files.** Declarations, parameter values, the model block
   with equation tags and model-local variables, leads and lags of any
-  length, `steady_state()`, `initval`, `steady_state_model`, the `shocks`
+  length (removed the way Dynare removes them, so that a term such as
+  `1 / c(+2)` keeps its curvature), `steady_state()`, `initval`,
+  `steady_state_model`, the `shocks`
   block with variances, covariances and correlations,
   `predetermined_variables`, and the `@#define` / `@#if` macro directives.
   Dynare's own example files load unmodified. An `initval` block written
@@ -37,6 +40,17 @@ and there the workbench is the more accurate of the two
   linearisation with exact derivatives (dual numbers, not finite
   differences), the Blanchard–Kahn count, and the decision rule
   `y = P y(-1) + Q e`.
+- **Solves to second order, on request.** One switch adds the quadratic
+  terms of the decision rule, again from exact derivatives. The summary
+  then sets each variable's mean beside its steady state (risk moves it:
+  precautionary saving, in the growth model). Responses are drawn for a
+  shock of any size and sign against the first-order response to the same
+  shock, because to second order three times the shock is not three times
+  the response. Simulated paths are pruned, and can be shown as the
+  second-order path, the first-order path for the same draws, or the
+  difference. The decision-rule tab lists the coefficient on every product
+  of two states or shocks. Correlated shocks are handled; a model declared
+  `linear` has no second-order terms and stays at first order.
 - **Treats indeterminacy as a result.** A model with too few or too many
   unstable roots gets a verdict and an eigenvalue chart, not an error
   message.
@@ -53,6 +67,8 @@ and there the workbench is the more accurate of the two
   figure, the model as a `.mod` file, a link that carries the model and the
   moved parameters, and a script that reproduces the solution in Cozy.
 
+![Second order: a five-standard-deviation shock against its first-order response](docs/img/second-order.png)
+
 ![The Taylor principle failing](docs/img/indeterminate.png)
 
 ## How it works
@@ -60,7 +76,12 @@ and there the workbench is the more accurate of the two
 The page has two halves. The reader (`docs/js/modfile.js`) is ordinary
 JavaScript: it parses the `.mod` text into syntax trees, introduces
 auxiliary variables for long leads and lags, and reports problems with line
-numbers. It solves nothing.
+numbers. It solves nothing. For a lead of two periods or more it follows
+Dynare's preprocessor: the auxiliary variable stands for the whole term
+whose expectation is taken, not for the variable inside it. To first order
+the two give the same solution; to second order only the first is right
+(`E[1/x]` is not `1/E[x]`), and the correction for risk in Dynare's
+`fs2000` example is six times off with the shortcut.
 
 The numerical work is done by [Cozy](https://github.com/micomrkaic/cozy), a
 small matrix language written in C, and its `dsge` package. The Cozy
@@ -97,6 +118,22 @@ difference is measured relative to the size of the quantity; the test fails
 above 1e-6. Where Dynare reports no variance (a unit root), the workbench
 must report none too.
 
+To second order the reference is `stoch_simul(order=2)`, and the comparison
+covers the second-order terms of the decision rule (Dynare's `ghxx`, `ghxu`,
+`ghuu` and `ghs2`), the means, and a pruned simulation of 40 periods for a
+fixed path of shocks:
+
+| Model | States | Largest relative difference |
+|---|---:|---:|
+| Real business cycles | 2 | 5.1e-14 |
+| Stochastic growth model | 2 | 1.3e-11 |
+| Collard's RBC, correlated shocks | 3 | 1.1e-13 |
+| Schorfheide (2000), leads of two periods | 4 | 1.2e-12 |
+| Fernández-Villaverde (2010) | 11 | 1.9e-9 |
+
+The other three models are declared `linear`: Dynare keeps them at first
+order, and the workbench reports second-order terms that are exactly zero.
+
 Two things the comparison brought out.
 
 Dynare's default tolerance for a numerically computed steady state is about
@@ -125,7 +162,12 @@ hard one by four orders of magnitude. (Solving that model's equation in
 
 ## Limits
 
-- First-order solutions only: no second order, no pruning.
+- No third order. At second order the standard deviations, correlations
+  and variance decomposition are those of the first-order solution (as in
+  Dynare); only the means are second-order.
+- Second-order responses are from the steady state with no other shocks,
+  not Dynare's simulated averages over future shocks, so the two are not
+  the same object and are not compared.
 - No estimation, filtering or forecasting. `estimated_params`, `varobs` and
   `estimation` are read past.
 - No occasionally binding constraints, optimal policy or perfect-foresight
@@ -143,16 +185,19 @@ hard one by four orders of magnitude. (Solving that model's equation in
 
 runs, with node 22 and nothing else installed:
 
-- the comparison with Dynare for the eight models (`test/validate.test.mjs`);
-- 25 tests of the reader and the solver (`test/modfile.test.mjs`): each
+- the comparison with Dynare for the eight models, to first order and to
+  second (`test/validate.test.mjs`);
+- 28 tests of the reader and the solver (`test/modfile.test.mjs`): each
   supported construct, operator precedence, error messages and their line
   numbers, auxiliary variables, correlated shocks, the Taylor principle,
   unit roots, a wrong `steady_state_model`, starting values that follow the
-  parameters.
+  parameters, Dynare's rule for long leads, second-order means, responses
+  and pruned paths.
 
-The page itself is driven in Chromium by `test/browser.mjs` (42 checks:
+The page itself is driven in Chromium by `test/browser.mjs` (56 checks:
 every tab, sliders, the pinned baseline, hover readouts, downloads, the
-share link, a file opened from disk, both themes, a phone-width screen):
+share link, the switch to second order and what each tab then shows, a
+file opened from disk, both themes, a phone-width screen):
 
     python3 -m http.server -d docs 8767 &
     node test/browser.mjs http://localhost:8767/

@@ -1,0 +1,1 @@
+{"dynare":"6.0","endo":["pi","y_gap","y_nat","y","yhat","r_nat","i","n","nu","a","z","p","w","c"],"exo":["eps_a","eps_nu","eps_z"],"order":1,"steady":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"state_names":["nu","a","z","p"],"aux":[],"sigma_e":[[0.0001,0,0],[0,6.25e-06,0],[0,0,2.5e-05]],"model":"Gali_2015.mod"}

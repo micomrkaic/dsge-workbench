@@ -22,12 +22,14 @@ const state = {
   loadError: "",                        /* Cozy refused the model */
   overrides: {}, sd: null,              /* parameter values and shock sizes moved away from the model's own */
   horizon: 40,
+  order: 1,                             /* 1 or 2: the order of approximation asked for */
+  size: 1,                              /* second order: the size of the shock in the responses, in standard deviations */
   result: null, solving: false,
   tab: "Summary",
   shock: 0, units: "dev", pinned: null,
   vars: null,                           /* names shown in charts and tables */
   relTo: null,                          /* moments: standard deviations relative to this variable */
-  sim: { T: 200, seed: 1, path: null, vars: [], slots: {} },
+  sim: { T: 200, seed: 1, path: null, vars: [], slots: {}, part: "total" },      /* part: which of a second-order path is drawn */
   table: false,
 };
 const engine = new EngineClient();
@@ -101,7 +103,7 @@ text.addEventListener("keydown", e => {
 function setText(value, name) {
   text.value = value;
   if (name) state.fileName = name;
-  state.overrides = {}; state.sd = null; state.pinned = null; state.vars = null; state.relTo = null; state.shock = 0;
+  state.overrides = {}; state.sd = null; state.pinned = null; state.vars = null; state.relTo = null; state.shock = 0; state.size = 1;
   state.sim.vars = []; state.sim.slots = {}; state.sim.path = null;
   paint();
   store("text", value);
@@ -147,7 +149,7 @@ async function step() {
   }
   state.solving = true;
   const slow = setTimeout(() => $("view").classList.add("stale"), 180);
-  const r = await wb.solve(state.overrides, { horizon: state.horizon, shocks: shocksNow() });
+  const r = await wb.solve(state.overrides, { horizon: state.horizon, shocks: shocksNow(), order: orderNow(), size: state.size });
   clearTimeout(slow);
   $("view").classList.remove("stale");
   state.solving = false;
@@ -180,6 +182,16 @@ function carryOver(before, model) {
   if (state.pinned && state.pinned.names.join() !== model.endo.map(v => v.name).join()) state.pinned = null;
 }
 function shocksNow() { return { sd: state.sd || state.model.shocks.sd, corr: state.model.shocks.corr }; }
+/* A model declared linear has no second-order terms: it is solved to first order whatever is asked. */
+function orderNow() { return state.order === 2 && state.model && !state.model.linear ? 2 : 1; }
+const second = () => (solved() && state.result.second && !state.result.second.linear ? state.result.second : null);
+function setOrder(o) {
+  if (o === state.order) return;
+  state.order = o;
+  store("order", String(o));
+  state.pinned = null;                  /* a baseline of the other order would be a different thing */
+  run();
+}
 
 /* ---- messages under the editor ----------------------------------------- */
 function renderMessages() {
@@ -261,9 +273,18 @@ function updateDerived() {
 $("reset").addEventListener("click", () => { state.overrides = {}; state.sd = null; renderParams(); run(); });
 
 /* ---- status line and tabs ----------------------------------------------- */
+/* The order of approximation is chosen in the status line, where it stays in view on every tab. */
+function orderSwitch() {
+  const linear = !!(state.model && state.model.linear);
+  return h("div", { class: "seg order", role: "group", "aria-label": "Order of approximation" },
+    h("button", { type: "button", class: orderNow() === 1 ? "on" : "", text: "1st order", title: "The linear solution: y = P y(-1) + Q e", onclick: () => setOrder(1) }),
+    h("button", { type: "button", class: orderNow() === 2 ? "on" : "", text: "2nd order", disabled: linear,
+      title: linear ? "This model is declared linear: its second-order solution is its first-order one" : "Add the second-order terms: risk shifts the means, and responses depend on the size and sign of a shock",
+      onclick: () => setOrder(2) }));
+}
 function renderStatus() {
-  const box = $("status"), r = state.result;
-  box.replaceChildren();
+  const box = h("div", { class: "status-main" }), r = state.result;
+  $("status").replaceChildren(box, orderSwitch());
   if (!state.parsed) { box.append(h("span", { class: "badge busy", text: "Starting…" })); return; }
   if (!state.model) { box.append(h("span", { class: "badge bad", text: "The model has errors" }), h("span", { text: "They are listed under the editor." })); return; }
   if (state.loadError) { box.append(h("span", { class: "badge bad", text: "Cozy could not compile the model" }), h("span", { text: state.loadError })); return; }
@@ -274,7 +295,7 @@ function renderStatus() {
   else if (r.verdict === "indeterminate") box.append(h("span", { class: "badge warn", text: "Indeterminate" }), h("span", { text: `${roots}: many stable paths` }));
   else if (r.verdict === "explosive") box.append(h("span", { class: "badge bad", text: "No stable solution" }), h("span", { text: `${roots}: every path explodes` }));
   else box.append(h("span", { class: "badge bad", text: "Not solved" }), h("span", { text: "the root count is right, but no decision rule could be computed" }));
-  box.append(h("span", { class: "dim", text: `solved in ${r.ms} ms by Cozy ${engine.version}` }));
+  box.append(h("span", { class: "dim", text: `${r.order === 2 ? "second order, " : ""}solved in ${r.ms} ms by Cozy ${engine.version}` }));
 }
 function renderTabs() {
   $("tabs").replaceChildren(...TABS.map(t => h("button", { type: "button", role: "tab", "aria-selected": String(t === state.tab), text: t, onclick: () => openTab(t) })));
@@ -343,31 +364,39 @@ function viewSummary(view) {
     tile("Forward-looking", r.forward, "appear with a lead"),
     tile("State variables", r.backward, "appear with a lag"),
     tile("Unstable roots", r.unstable, r.determinate ? "as many as needed" : `${r.forward} needed`),
-    tile("Solved in", `${r.ms} ms`, `Cozy ${engine.version}`)));
+    tile("Solved in", `${r.ms} ms`, `${r.order === 2 ? "to second order, " : ""}Cozy ${engine.version}`)));
   view.append(h("h3", { text: "Eigenvalues" }), h("div", { class: "wide" }, rootsChart(r.roots)),
     h("p", { class: "foot", text: "Moduli of the model's generalised eigenvalues, on a log scale. Roots at zero and at infinity sit at the edges. Hover a dot for its value." }));
   const how = wb.steadyKind === "formula" ? "given by the model's steady_state_model block and checked against the equations"
     : wb.steadyKind === "zero" ? "zero: the model is linear and has no constant terms" : "found by Newton's method with exact derivatives, starting from initval";
-  const rows = m.endo.filter(v => !v.aux).map(v => ({ cells: [v.name, v.longName, r.steady[indexOf(v.name)]] }));
-  view.append(h("h3", { text: "Steady state" }),
+  const s2 = second();
+  const rows = m.endo.filter(v => !v.aux).map(v => { const i = indexOf(v.name); return { cells: [v.name, v.longName, r.steady[i], ...(s2 ? [r.steady[i] + s2.mean[i], s2.mean[i]] : [])] }; });
+  const head = ["Variable", "Description", "Steady state", ...(s2 ? ["Mean, second order", "Difference"] : [])];
+  view.append(h("h3", { text: s2 ? "Steady state and mean" : "Steady state" }),
     h("div", { class: "bar" }, h("span", { class: "dim", text: `The steady state is ${how}.` }), h("span", { class: "spacer" }),
-      exportButtons(() => download(`${stem()}-steady-state.csv`, csv([["variable", "description", "steady state"], ...rows.map(x => x.cells)]), "text/csv"))),
-    table(["Variable", "Description", "Steady state"], rows, { text: [1], digits: 8 }));
+      exportButtons(() => download(`${stem()}-steady-state.csv`, csv([head.map(x => x.toLowerCase()), ...rows.map(x => x.cells)]), "text/csv"))),
+    table(head, rows, { text: [1], digits: 8 }));
+  if (s2) view.append(h("p", { class: "foot", text: "To first order a variable's mean is its steady state. To second order it is not: uncertainty about the future shifts the decision rule, and the rule's curvature turns the variance of the states and shocks into a change in the mean." +
+    (s2.mean.some(Number.isNaN) ? " A dash marks a variable that has no mean: it has a unit root, or depends on one that has." : "") }));
 }
 
 /* ---- Impulse responses --------------------------------------------------- */
+/* The responses on show: to second order where that was solved for, else to first. */
+const irfNow = () => (second() ? second().irf : state.result.irf);
 function irfSeries(name) {
-  const r = state.result, i = indexOf(name), ss = r.steady[i];
+  const r = state.result, i = indexOf(name), ss = r.steady[i], s2 = second();
   const pct = state.units === "pct" && Math.abs(ss) > 1e-9;
   const scale = v => (pct ? (100 * v) / Math.abs(ss) : v);
-  const out = [{ name: "now", color: SERIES[0], values: r.irf[state.shock].map(row => scale(row[i])) }];
+  const out = [{ name: s2 ? "second order" : "now", color: SERIES[0], values: irfNow()[state.shock].map(row => scale(row[i])) }];
+  /* what a linear model would say of a shock of this size: the second-order line is read against it */
+  if (s2) out.unshift({ name: "first order", color: SERIES[1], dashed: true, values: r.irf[state.shock].map(row => scale(s2.size * row[i])) });
   const p = state.pinned;
   if (p && p.irf[state.shock]) out.unshift({ name: "pinned", color: "var(--muted)", dashed: true, values: p.irf[state.shock].map(row => (pct ? (100 * row[i]) / Math.abs(p.steady[i]) : row[i])) });
   return { series: out, pct };
 }
 function viewIrf(view) {
   if (!solved()) { view.append(noSolution()); return; }
-  const r = state.result, m = state.model, sd = shocksNow().sd;
+  const r = state.result, m = state.model, sd = shocksNow().sd, s2 = second();
   const shockSel = h("select", { "aria-label": "Shock", onchange: e => { state.shock = +e.target.value; render(); } },
     m.exo.map((s, j) => h("option", { value: j, selected: j === state.shock, text: `${s.name}${s.longName ? " — " + s.longName : ""}${sd[j] === 0 ? " (size 0)" : ""}` })));
   const anyLevel = r.steady.some(v => Math.abs(v) > 1e-9);
@@ -376,15 +405,20 @@ function viewIrf(view) {
   view.append(h("div", { class: "bar" },
     h("label", {}, "Shock", shockSel),
     h("label", {}, "Horizon", h("input", { type: "number", min: 4, max: 400, step: 1, value: state.horizon, onchange: e => { state.horizon = Math.max(4, Math.min(400, Math.round(+e.target.value) || 40)); state.pinned = null; run(); } })),
+    s2 ? h("label", { title: "The size of the shock, in standard deviations; negative for a shock the other way. To second order the response is not proportional to it." }, "Size",
+      h("input", { type: "number", step: 0.5, min: -20, max: 20, value: state.size, "aria-label": "Shock size in standard deviations", onchange: e => { const v = Math.max(-20, Math.min(20, +e.target.value)); state.size = Number.isFinite(v) && v !== 0 ? v : 1; state.pinned = null; run(); } }), "s.d.") : null,
     anyLevel ? h("div", { class: "seg", role: "group", "aria-label": "Units" },
       h("button", { type: "button", class: state.units === "dev" ? "on" : "", text: "Deviation", onclick: () => { state.units = "dev"; render(); } }),
       h("button", { type: "button", class: state.units === "pct" ? "on" : "", text: "% of steady state", onclick: () => { state.units = "pct"; render(); } })) : null,
-    h("button", { type: "button", text: state.pinned ? "Re-pin" : "Pin as baseline", title: "Keep these responses on the charts while you change parameters", onclick: () => { state.pinned = { irf: r.irf, steady: r.steady, names: r.names.slice() }; render(); } }),
+    h("button", { type: "button", text: state.pinned ? "Re-pin" : "Pin as baseline", title: "Keep these responses on the charts while you change parameters", onclick: () => { state.pinned = { irf: irfNow(), steady: r.steady, names: r.names.slice() }; render(); } }),
     state.pinned ? h("button", { type: "button", text: "Unpin", onclick: () => { state.pinned = null; render(); } }) : null,
     h("span", { class: "spacer" }),
     h("button", { type: "button", class: "small" + (state.table ? " on" : ""), text: "Table", title: "Show the numbers instead of the charts", onclick: () => { state.table = !state.table; render(); } }),
     exportButtons(() => download(`${stem()}-irf-${m.exo[state.shock].name}.csv`, csv([["period", ...names], ...r.irf[state.shock].map((row, t) => [t, ...names.map(nm => irfSeries(nm).series.at(-1).values[t])])]), "text/csv"), state.table ? null : cards)));
-  if (state.pinned) view.append(legend([{ name: "these settings", color: SERIES[0] }, { name: "pinned baseline", color: "var(--muted)", dashed: true }]));
+  if (state.pinned || s2) view.append(legend([
+    { name: s2 ? "second order" : "these settings", color: SERIES[0] },
+    ...(s2 ? [{ name: "first order, the same shock", color: SERIES[1], dashed: true }] : []),
+    ...(state.pinned ? [{ name: "pinned baseline", color: "var(--muted)", dashed: true }] : [])]));
   const picker = chips(state.vars, toggleVar, allNone());
   if (picker) view.append(picker);
   if (!names.length) { view.append(h("p", { class: "empty", text: "Choose variables above." })); return; }
@@ -399,7 +433,10 @@ function viewIrf(view) {
     })));
   }
   const size = sd[state.shock];
-  view.append(h("p", { class: "foot", text: `Responses to a one-standard-deviation innovation in ${m.exo[state.shock].name} (${fmt(size, 4)}) at period 0, as deviations from the steady state${state.units === "pct" && anyLevel ? ", in percent of it where it is not zero" : ""}.` +
+  const what = s2
+    ? `Responses to second order to an innovation of ${fmt(s2.size, 3)} standard deviation${Math.abs(s2.size) === 1 ? "" : "s"} in ${m.exo[state.shock].name} (${fmt(s2.size * size, 4)}) at period 0 and no shocks after: the path with the shock less the path without it, both from the steady state and pruned. The dashed line is the first-order response to the same shock`
+    : `Responses to a one-standard-deviation innovation in ${m.exo[state.shock].name} (${fmt(size, 4)}) at period 0, as deviations from the steady state`;
+  view.append(h("p", { class: "foot", text: `${what}${state.units === "pct" && anyLevel ? ", in percent of the steady state where it is not zero" : ""}.` +
     (m.shocks.corr.some((row, i) => row.some((c, j) => i !== j && c !== 0)) ? " The shocks are correlated; they are orthogonalised in the order declared, as in Dynare." : "") }));
 }
 
@@ -407,9 +444,9 @@ function viewIrf(view) {
 function viewMoments(view) {
   if (!solved()) { view.append(noSolution()); return; }
   const r = state.result, m = state.model, names = m.endo.filter(v => !v.aux).map(v => v.name);
-  const ref = r.sd[indexOf(state.relTo)];
-  const rows = names.map(nm => { const i = indexOf(nm); return { cells: [nm, r.steady[i], r.sd[i], r.sd[i] / ref, ...r.acorr[i]] }; });
-  const head = ["Variable", "Mean", "Std. dev.", `Relative to ${state.relTo}`, ...r.acorr[0].map((_, j) => `AC(${j + 1})`)];
+  const ref = r.sd[indexOf(state.relTo)], s2 = second();
+  const rows = names.map(nm => { const i = indexOf(nm); return { cells: [nm, ...(s2 ? [r.steady[i], r.steady[i] + s2.mean[i]] : [r.steady[i]]), r.sd[i], r.sd[i] / ref, ...r.acorr[i]] }; });
+  const head = ["Variable", ...(s2 ? ["Steady state", "Mean"] : ["Mean"]), "Std. dev.", `Relative to ${state.relTo}`, ...r.acorr[0].map((_, j) => `AC(${j + 1})`)];
   const pick = shown();
   const corr = pick.map(a => pick.map(b => r.corr[indexOf(a)][indexOf(b)]));
   view.append(h("div", { class: "bar" },
@@ -417,6 +454,7 @@ function viewMoments(view) {
     h("span", { class: "spacer" }),
     exportButtons(() => download(`${stem()}-moments.csv`, csv([head.map(x => x.replace(/^Relative to .*/, `sd relative to ${state.relTo}`)), ...rows.map(x => x.cells)]), "text/csv"))),
     table(head, rows));
+  if (s2) view.append(h("p", { class: "foot", text: "The mean is to second order. The standard deviations, correlations and autocorrelations are those of the first-order solution, which is also what Dynare reports at order 2." }));
   if (r.sd.some(Number.isNaN)) view.append(h("p", { class: "foot", text: "A dash marks a variable with a unit root: it has no unconditional variance, so no standard deviation or correlation." }));
   view.append(h("h3", { text: "Correlations" }));
   const picker = chips(state.vars, toggleVar, allNone());
@@ -451,13 +489,20 @@ function viewVardecomp(view) {
   if (names.length) view.append(h("div", { class: "wide" }, stackedBars(names.map(nm => ({ name: nm, shares: share(r.vardecomp[indexOf(nm)]), why: Number.isNaN(r.sd[indexOf(nm)]) ? "unit root: no variance to decompose" : "never moves" })), shockNames, { left })));
   view.append(h("h3", { text: "The numbers" }), table(["Variable", ...m.exo.map(s => s.name)], all.map(nm => ({ cells: [nm, ...r.vardecomp[indexOf(nm)]] })), { digits: 4 }));
   if (m.shocks.corr.some((row, i) => row.some((c, j) => i !== j && c !== 0))) view.append(h("p", { class: "foot", text: "The shocks are correlated; the decomposition is for the orthogonalised innovations, in the order declared." }));
+  if (second()) view.append(h("p", { class: "foot", text: "The decomposition is that of the first-order solution: to second order the shocks' effects do not add up, so a variance has no shares." }));
 }
 
 /* ---- Simulation ----------------------------------------------------------- */
 async function simulate() {
   if (!solved()) return;
-  try { state.sim.path = await wb.simulate(state.sim.T, state.sim.seed); }
-  catch (e) { state.sim.path = null; toast(e.message); }
+  const s = state.sim;
+  try {
+    if (second()) {
+      /* the same draws to both orders: the first-order path and the correction that second order adds */
+      const both = await wb.simulate(s.T, s.seed, true);
+      s.path = both.first.map((row, t) => Array.from(row, (v, i) => (s.part === "first" ? v : s.part === "diff" ? both.second[t][i] : v + both.second[t][i])));
+    } else s.path = await wb.simulate(s.T, s.seed);
+  } catch (e) { s.path = null; toast(e.message); }
 }
 function simToggle(n) {
   const s = state.sim;
@@ -468,16 +513,22 @@ function simToggle(n) {
 }
 function viewSimulation(view) {
   if (!solved()) { view.append(noSolution()); return; }
-  const r = state.result, s = state.sim;
+  const r = state.result, s = state.sim, s2 = second();
   const redo = async () => { await simulate(); render(); };
   const all = state.model.endo.filter(v => !v.aux).map(v => v.name);
+  const part = s2 ? s.part : "first";
+  const partButton = (key, label, title) => h("button", { type: "button", class: s.part === key ? "on" : "", text: label, title, onclick: () => { s.part = key; redo(); } });
   view.append(h("div", { class: "bar" },
     h("label", {}, "Periods", h("input", { type: "number", min: 20, max: 5000, step: 10, value: s.T, onchange: e => { s.T = Math.max(20, Math.min(5000, Math.round(+e.target.value) || 200)); redo(); } })),
     h("label", {}, "Seed", h("input", { type: "number", min: 0, step: 1, value: s.seed, onchange: e => { s.seed = Math.max(0, Math.round(+e.target.value) || 0); redo(); } })),
     h("button", { type: "button", text: "New draw", onclick: () => { s.seed++; redo(); } }),
+    s2 ? h("div", { class: "seg", role: "group", "aria-label": "Which path" },
+      partButton("total", "Second order", "The pruned second-order path"),
+      partButton("first", "First order", "The first-order path for the same shocks"),
+      partButton("diff", "Difference", "What the second-order terms add to the first-order path")) : null,
     h("span", { class: "spacer" }),
-    exportButtons(() => s.path && download(`${stem()}-simulation.csv`, csv([["period", ...all], ...s.path.map((row, t) => [t + 1, ...all.map(nm => row[indexOf(nm)] + r.steady[indexOf(nm)])])]), "text/csv"),
-      () => [{ title: "Simulated path, deviations from the steady state", sub: s.vars.join(" · "), chart: view.querySelector("svg.chart") }])));
+    exportButtons(() => s.path && download(`${stem()}-simulation${part === "diff" ? "-difference" : ""}.csv`, csv([["period", ...all], ...s.path.map((row, t) => [t + 1, ...all.map(nm => row[indexOf(nm)] + (part === "diff" ? 0 : r.steady[indexOf(nm)]))])]), "text/csv"),
+      () => [{ title: part === "diff" ? "Simulated path, second order less first order" : "Simulated path, deviations from the steady state", sub: s.vars.join(" · "), chart: view.querySelector("svg.chart") }])));
   view.append(h("div", { class: "pickers", role: "group", "aria-label": "Variables drawn (up to four)" },
     all.map(n => h("button", { type: "button", class: "chip", "aria-pressed": String(s.vars.includes(n)), title: longOf(n) || n, text: n, onclick: () => { simToggle(n); render(); } }))));
   if (!s.path) { view.append(h("p", { class: "empty", text: "Drawing…" })); return; }
@@ -486,7 +537,9 @@ function viewSimulation(view) {
   if (series.length > 1) view.append(legend(series));
   const width = Math.max(480, Math.min(1400, view.clientWidth - 58));
   view.append(h("div", { class: "wide" }, lineChart(series, { width, height: Math.round(Math.max(260, Math.min(380, width * 0.4))), x0: 1, xLabel: "period", period: "period", label: "simulated path", thin: s.T > 120 })),
-    h("p", { class: "foot", text: `One random path of ${s.T} periods from the steady state, as deviations from it${series.length === 1 ? ` (${series[0].name})` : ""}. The CSV holds every variable, in levels. The same seed gives the same path.` }));
+    h("p", { class: "foot", text: (part === "diff"
+      ? `What the second-order terms add to a first-order path of ${s.T} periods from the steady state: the pruned second-order path less the first-order path for the same shocks${series.length === 1 ? ` (${series[0].name})` : ""}. The CSV holds this difference for every variable.`
+      : `One random path of ${s.T} periods from the steady state, as deviations from it${series.length === 1 ? ` (${series[0].name})` : ""}${s2 && part === "total" ? ", to second order with pruning: the first-order path feeds the second-order correction and never the other way, so the path cannot explode" : ""}. The CSV holds every variable, in levels.`) + " The same seed gives the same path." }));
 }
 
 /* ---- Decision rule --------------------------------------------------------- */
@@ -506,6 +559,21 @@ function viewRule(view) {
     exportButtons(() => download(`${stem()}-decision-rule.csv`, csv([["", ...cols], ...rows.map(x => x.cells)]), "text/csv"))),
     table(["", ...cols], rows, { digits: 6 }),
     h("p", { class: "foot", text: "y(t) = steady state + P (y(t−1) − steady state) + Q e(t). This is the layout of Dynare's “policy and transition functions”, with rows and columns exchanged." }));
+  const s2 = second();
+  if (!s2) return;
+  /* each product once: a square's coefficient is half the second derivative, a cross term's the whole of it */
+  const nx = s2.states.length, k = m.exo.length, lag = nm => `${nm}(-1)`, terms = [{ label: "Risk (no product)", of: i => 0.5 * s2.s2[i] }];
+  for (let a = 0; a < nx; a++) for (let b = a; b < nx; b++) terms.push({ label: `${lag(s2.states[a])} × ${lag(s2.states[b])}`, of: i => (a === b ? 0.5 : 1) * s2.Gxx[i][a * nx + b], sep: a === 0 && b === 0 });
+  for (let a = 0; a < nx; a++) for (let j = 0; j < k; j++) terms.push({ label: `${lag(s2.states[a])} × ${m.exo[j].name}`, of: i => s2.Gxu[i][a * k + j], sep: a === 0 && j === 0 });
+  for (let j = 0; j < k; j++) for (let l = j; l < k; l++) terms.push({ label: `${m.exo[j].name} × ${m.exo[l].name}`, of: i => (j === l ? 0.5 : 1) * s2.Guu[i][j * k + l], sep: j === 0 && l === 0 });
+  const rows2 = terms.map(t => ({ sep: t.sep, cells: [t.label, ...ci.map(t.of)] })).filter((row, q) => q === 0 || row.cells.slice(1).some(v => v !== 0));
+  view.append(h("h3", { text: "Second-order terms" }),
+    h("div", { class: "bar" },
+      h("span", { class: "dim", text: `What second order adds to each variable: a constant for risk, and a coefficient on each product of two of last period's state variables or this period's shocks (${rows2.length - 1} of ${terms.length - 1} products have one).` }),
+      h("span", { class: "spacer" }),
+      exportButtons(() => download(`${stem()}-decision-rule-second-order.csv`, csv([["", ...cols], ...rows2.map(x => x.cells)]), "text/csv"))),
+    table(["", ...cols], rows2, { digits: 6 }),
+    h("p", { class: "foot", text: "Add to the first-order rule: the first row, and each coefficient times its product (state variables as deviations from the steady state). Each product is listed once, so the coefficient of a square is half of Dynare's ghxx or ghuu entry, that of a cross term the whole entry, and the first row is half of ghs2." }));
 }
 
 /* ---- Cozy script ------------------------------------------------------------ */
@@ -620,7 +688,7 @@ $("save").addEventListener("click", () => download(state.fileName.endsWith(".mod
 const b64 = { enc: bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""), dec: s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0)) };
 async function pipe(bytes, stream) { return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer()); }
 $("share").addEventListener("click", async () => {
-  const payload = new TextEncoder().encode(JSON.stringify({ t: text.value, o: state.overrides, s: state.sd, n: state.fileName }));
+  const payload = new TextEncoder().encode(JSON.stringify({ t: text.value, o: state.overrides, s: state.sd, n: state.fileName, q: state.order, z: state.size }));
   const packed = "CompressionStream" in window ? await pipe(payload, new CompressionStream("deflate-raw")) : payload;
   const chunk = []; for (let i = 0; i < packed.length; i += 8192) chunk.push(String.fromCharCode(...packed.subarray(i, i + 8192)));
   const url = `${location.origin}${location.pathname}#${"CompressionStream" in window ? "z" : "j"}=${btoa(chunk.join("")).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
@@ -636,6 +704,8 @@ async function fromLink() {
     state.title = data.n || "shared model";
     setText(data.t, data.n || "model.mod");
     state.overrides = data.o || {}; state.sd = data.s || null;       /* the text is read by now; show what was moved */
+    state.order = data.q === 2 ? 2 : 1;
+    state.size = Number.isFinite(data.z) && data.z !== 0 ? data.z : 1;
     renderParams();
     return true;
   } catch { toast("That link could not be read"); return false; }
@@ -656,8 +726,10 @@ $("about-open").addEventListener("click", async () => {
   if (!t.childElementCount) {
     try {
       const rows = await (await fetch("validation.json")).json();
-      t.append(h("thead", {}, h("tr", {}, ["Model", "Variables", "Shocks", "Largest difference from Dynare"].map((c, i) => h("th", { class: i === 0 ? "text" : "", text: c })))),
-        h("tbody", {}, rows.models.map(r => h("tr", {}, h("td", { class: "text", text: r.title }), h("td", { text: String(r.variables) }), h("td", { text: String(r.shocks) }), h("td", { text: r.worst.toExponential(1).replace("e-", " × 10^−") })))));
+      const sci = v => v.toExponential(1).replace("e-", " × 10^−");
+      t.append(h("thead", {}, h("tr", {}, ["Model", "Variables", "Shocks", "First order", "Second order"].map((c, i) => h("th", { class: i === 0 ? "text" : "", text: c })))),
+        h("tbody", {}, rows.models.map(r => h("tr", {}, h("td", { class: "text", text: r.title }), h("td", { text: String(r.variables) }), h("td", { text: String(r.shocks) }), h("td", { text: sci(r.worst) }),
+          h("td", { class: r.second === null ? "none" : "", text: r.second === null ? "linear" : sci(r.second) })))));
     } catch { /* the table is a nicety */ }
   }
   $("about").showModal();
@@ -671,6 +743,7 @@ async function boot() {
   $("example").replaceChildren(h("option", { value: "", text: "Examples…" }), ...state.examples.map(e => h("option", { value: e.file, text: e.title, title: e.about })));
   const tab = recall("tab");
   if (TABS.includes(tab)) state.tab = tab;
+  if (recall("order") === "2") state.order = 2;
   if (await fromLink()) { run(); return; }
   const saved = recall("text");
   if (saved && saved.trim()) {

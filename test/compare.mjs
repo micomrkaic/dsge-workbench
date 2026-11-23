@@ -84,3 +84,63 @@ export async function compareWithDynare(engine, ex) {
 
     return { variables: n, shocks: k, report };
 }
+
+// The second-order solution against Dynare's stoch_simul(order=2)
+// (test/reference/NAME.order2.json). Returns {linear, states, report}:
+// report maps each quantity to the largest relative difference. For a model
+// declared linear Dynare stays at first order; there the workbench must
+// report second-order terms that are all zero.
+//
+// Dynare's state vector is in its own order and names its auxiliary
+// variables differently, so each of its states is matched to the
+// workbench's by what it stands for: AUX_ENDO_LAG for x(-k) is x_LAGk, the
+// auxiliary variable for a shock is e_NOW and for its lag e(-k), e_LAGk.
+export async function compareSecondOrder(engine, ex) {
+  const name = ex.file.replace(/\.mod$/, "");
+  const ref = JSON.parse(fs.readFileSync(new URL(`reference/${name}.order2.json`, here), "utf8"));
+  const parsed = parseMod(fs.readFileSync(new URL(`../docs/examples/${ex.file}`, here), "utf8"));
+  const model = parsed.model, wb = new Workbench(engine);
+  await wb.load(model);
+  const r = await wb.solve({}, { order: 2 });
+  assert.ok(r.ok, r.error);
+  const n = ref.endo.length, k = ref.exo.length, s2 = r.second;
+  assert.ok(s2, "a solve at order 2 returns the second-order terms");
+  const flat = x => x.flat(3);
+  if (ref.order < 2) {
+    assert.ok(model.linear && s2.linear, "Dynare keeps only a linear model at first order");
+    assert.ok([s2.Gxx, s2.Gxu, s2.Guu, s2.s2].every(m => flat(m).every(v => v === 0)), "a linear model has no second-order terms");
+    assert.ok(s2.mean.every(v => v === 0 || Number.isNaN(v)), "... and its means are its steady state");
+    return { linear: true, states: s2.states.length, report: {} };
+  }
+  assert.ok(!s2.linear);
+  const mine = new Map(s2.states.map((nm, i) => [nm, i]));
+  const auxOf = new Map(ref.aux.map(a => [a.name, a]));
+  const translate = nm => {
+    const a = auxOf.get(nm);
+    if (!a) return nm;
+    if (a.type === 1) return `${a.of}_LAG${-a.lag}`;
+    if (a.type === 3) return a.lag === 0 ? `${a.of}_NOW` : `${a.of}_LAG${-a.lag}`;
+    return nm;
+  };
+  const at = ref.state_names.map(nm => mine.get(translate(nm)));
+  assert.ok(at.every(i => i !== undefined), `every state of Dynare's is one of the workbench's (${ref.state_names.map(translate).join(" ")} against ${s2.states.join(" ")})`);
+  assert.equal(new Set(at).size, s2.states.length, "the two programs have the same state variables");
+  const nx = at.length;
+  // the workbench's matrices with their columns in Dynare's order
+  const pick = (M, cols) => M.slice(0, n).map(row => cols.map(c => row[c]));
+  const xx = [], xu = [];
+  for (const a of at) { for (const b of at) xx.push(a * nx + b); for (let j = 0; j < k; j++) xu.push(a * k + j); }
+  const report = {};
+  report.ghxx = gap(pick(s2.Gxx, xx), ref.ghxx, 1e-3 * largest(ref.ghxx));
+  report.ghxu = gap(pick(s2.Gxu, xu), ref.ghxu, 1e-3 * largest(ref.ghxu));
+  report.ghuu = gap(s2.Guu.slice(0, n), ref.ghuu, 1e-3 * largest(ref.ghuu));
+  report.ghs2 = gap(s2.s2.slice(0, n), ref.ghs2, 1e-3 * largest(ref.ghs2));
+  // the means to second order: Dynare reports levels
+  const level = s2.mean.slice(0, n).map((d, i) => r.steady[i] + d);
+  report.mean = gap(level, ref.mean, 1e-3 * largest(ref.mean));
+  // a pruned simulation for the path of shocks Dynare was given
+  const path = await wb.path2(ref.shock_path);
+  const sim = path.first.map((row, t) => row.slice(0, n).map((v, i) => r.steady[i] + v + path.second[t][i]));
+  report.simulation = gap(sim, ref.sim, 1e-3 * largest(ref.sim));
+  return { linear: false, states: nx, report };
+}

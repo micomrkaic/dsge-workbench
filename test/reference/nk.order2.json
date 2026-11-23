@@ -1,0 +1,1 @@
+{"dynare":"6.0","endo":["x","pi","i","r","rn","v"],"exo":["en","ev"],"order":1,"steady":[0,0,0,0,0,0],"state_names":["rn","v"],"aux":[],"sigma_e":[[0.0625,0],[0,0.0625]],"model":"nk.mod"}

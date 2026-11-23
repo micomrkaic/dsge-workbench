@@ -5,7 +5,11 @@
  * instead of raising an error when a model has no unique stable solution,
  * and they compute moments in a way that copes with unit roots (a price
  * level, say), reporting those variables as having no variance instead of
- * refusing the whole model.
+ * refusing the whole model. To second order the package gives the terms of
+ * the decision rule (its internal dg_second, which takes the shocks'
+ * covariance, so correlated shocks are covered) and the pruned path for a
+ * given run of shocks (dg_path2); the means, the responses and the simulated
+ * paths built on those are here.
  *
  * Part of dsge-workbench. Copyright (C) 2026 Mico Mrkaic.
  * GPL-3.0-or-later; see LICENSE. */
@@ -114,5 +118,75 @@ let wb_simulate = fn P, C, T, seed -> (
   let y = zeros(n, 1);
   for t = 1 : T do ( y = P * y + C * randn(k, 1); Y[t, :] = y' ) end;
   Y
+)
+
+% ---- second order -----------------------------------------------------------
+% A second-order solution here is the record s2 = {model, ybar, P, Q, Gxx,
+% Gxu, Guu, s2} that the package's dg_path2 reads, with the rule
+%   y = ybar + P y(-1) + Q e + 1/2 [Gxx (x (x) x) + 2 Gxu (x (x) e) + Guu (e (x) e) + s2]
+% and x the state variables (positions st) as they were last period. Ce is
+% the k by k matrix that turns unit, uncorrelated innovations into the
+% model's shocks (e = Ce u; its columns are the orthogonalised
+% one-standard-deviation innovations), and C = Q Ce.
+
+% wb_mean2(P, C, S, st, Gxx, Guu, s2): the unconditional means to second
+% order, as deviations from the steady state. The rule's curvature turns the
+% variance of the states and of the shocks (covariance S) into a constant,
+% and the constant accumulates through P: the sum of P^j times it, taken by
+% doubling. nan where there is no mean: a variable with a unit root, one
+% whose curvature loads on a state with a unit root, and one in which the
+% constant accumulates without bound.
+let wb_mean2 = fn P, C, S, st, Gxx, Guu, s2 -> (
+  let n = size(P)[1]; let nx = numel(st); let k = size(S)[1];
+  let v = wb_cov(P, C);
+  let ux = pick(v.unit[st, 1], 1.0, 0.0);
+  let mask = reshape(1.0 - (1.0 - ux) * (1.0 - ux)', nx * nx, 1);    % pairs of states with a unit root in them
+  let w = pick(mask > 0.5, 0.0, reshape(v.S[st, st], nx * nx, 1));
+  let dep = (abs(Gxx) * mask) > 0.0;
+  let mu = 0.5 * (Gxx * w + Guu * reshape(S, k * k, 1) + s2);
+  let M = P; let it = 0; let moving = true;
+  let share = zeros(n, 1);
+  while moving && (it < 34) do (
+    let d = M * mu;
+    let now = abs(d) ./ max(abs(mu + d), 1e-300);
+    moving = (it < 2) || (max(abs(now - share)) > 1e-13);
+    share = now;
+    mu = mu + d;
+    M = M * M;
+    it = it + 1
+  ) end;
+  let bad = pick(v.unit, 1.0, 0.0) + pick(dep, 1.0, 0.0) + pick(share > 1e-9, 1.0, 0.0);
+  pick(bad > 0.5, 0.0 / 0.0, mu)
+)
+
+% wb_irf2(s2, Ce, T, z): the responses to second order of every variable to
+% each innovation, z standard deviations of it at period 0 and no shocks
+% after, stacked as wb_irf stacks them. A response is the path with the
+% shock less the path without it; both start at the steady state and are
+% pruned. To first order the response would be z times wb_irf's.
+let wb_irf2 = fn s2, Ce, T, z -> (
+  let n = s2.model.n; let k = size(Ce)[2]; let ke = size(Ce)[1];
+  let Y = zeros(k * T, n);
+  let base = dg_path2(s2, zeros(T, ke)).Y2;
+  for j = 1 : k do (
+    let E = zeros(T, ke);
+    E[1, :] = (z * Ce[:, j])';
+    let a = dg_path2(s2, E);
+    Y[(j - 1) * T + 1 : j * T, :] = a.Y1 + a.Y2 - base
+  ) end;
+  Y
+)
+
+% wb_simulate2(s2, Ce, T, seed): a pruned simulated path to second order,
+% from the steady state, for the same draws wb_simulate makes with that
+% seed. T by 2n: the first-order part of the path, then the second-order
+% correction; the path is their sum (deviations from the steady state).
+let wb_simulate2 = fn s2, Ce, T, seed -> (
+  rng(seed);
+  let k = size(Ce)[2];
+  let E = zeros(T, size(Ce)[1]);
+  for t = 1 : T do ( E[t, :] = (Ce * randn(k, 1))' ) end;
+  let r = dg_path2(s2, E);
+  [r.Y1, r.Y2]
 )
 `;

@@ -734,16 +734,66 @@ export function parseMod(source) {
    * steady state of x. */
   const ssParams = new Map();
   const taken = name => kinds.has(name) || [...ssParams.values()].includes(name);
-  const fresh = stem => { let s = stem, k = 1; while (taken(s) || aux.some(a => a.name === s)) s = `${stem}_${++k}`; return s; };
+  const fresh = stem => { let s = stem, k = 1; while (taken(s) || aux.some(a => a.name === s) || leadAux.some(a => a.name === s)) s = `${stem}_${++k}`; return s; };
   const aux = [];                                   /* {name, of, shift, def} auxiliary variables and their equations */
+  const leadAux = [];                               /* those that stand for something expected; they go after the others */
   eqs = eqs.map(q => ({ ...q, expr: mapAst(q.expr, n => {
     if (n.t !== "ss") return null;
     if (!ssParams.has(n.name)) ssParams.set(n.name, fresh(`${n.name}_SS`));
     return { t: "par", name: ssParams.get(n.name), line: n.line };
   }) }));
 
-  /* Leads and lags beyond one period, and lagged shocks, through auxiliary
-   * variables (x_LAG1 = x(-1), then x(-2) is x_LAG1(-1), and so on). */
+  /* Leads of two periods or more, the way Dynare removes them
+   * (substituteEndoLeadGreaterThanTwo in its preprocessor). An auxiliary
+   * variable must stand for something whose expectation is being taken, and
+   * expectations pass through sums and through multiplication by what is
+   * known today, but through nothing else: in 1 / (c(+2) * P(+2)) it is the
+   * whole quotient that is expected, not c(+2) and P(+2) separately. So the
+   * walk goes down through +, - and unary minus, and through * and / when
+   * the other side has no lead, and where it has to stop, the term it has
+   * reached is moved back until its longest lead is one period and gets a
+   * variable of its own: AUX = term(-1), and the term is AUX(+1).
+   *
+   * Replacing x(+2) alone by x_LEAD1(+1) wherever it occurs gives the same
+   * first-order solution, and the workbench did that until it solved to
+   * second order. To second order it is wrong: E[1 / x(+2)] is not
+   * 1 / E[x(+2)], and the correction for risk comes out different. */
+  const endoLead = e => { let m = 0; walkAst(e, n => { if (n.t === "var" && n.shift > m) m = n.shift; }); return m; };
+  const exoLead = e => { let m = 0; walkAst(e, n => { if (n.t === "exo" && n.shift > m) m = n.shift; }); return m; };
+  const shiftAst = (e, d) => mapAst(e, n => (n.t === "var" || n.t === "exo" ? { ...n, shift: n.shift + d } : null));
+  const timed = n => (n.t === "var" || n.t === "exo" ? `${n.name}${n.shift ? `(${n.shift > 0 ? "+" : ""}${n.shift})` : ""}` : n.name);
+  const leadFor = new Map();                        /* a term, as text -> the variable that, one period ahead, stands for it */
+  const auxFor = e => {
+    const lead = endoLead(e);
+    let sub = shiftAst(e, -(lead - 1));             /* the term with its longest lead at one period */
+    for (let back = lead - 2; back >= 0; back--) {
+      const key = printAst(shiftAst(e, -back), timed);
+      if (!leadFor.has(key)) {
+        const alone = e.t === "var";
+        const nm = fresh(alone ? `${e.name}_LEAD${lead - 1 - back}` : `AUX_LEAD_${leadAux.filter(a => !a.alone).length + 1}`);
+        leadAux.push({ name: nm, of: alone ? e.name : "", shift: lead - 1 - back, def: sub, alone, long: alone ? "" : `expected: ${printAst(sub, timed)}` });
+        leadFor.set(key, nm);
+      }
+      sub = { t: "var", name: leadFor.get(key), shift: 1, line: e.line };
+    }
+    return sub;
+  };
+  const longLeads = e => {
+    if (endoLead(e) < 2) return e;
+    if (e.t === "neg") return { ...e, a: longLeads(e.a) };
+    if (e.t === "bin" && (e.op === "+" || e.op === "-")) return { ...e, a: longLeads(e.a), b: longLeads(e.b) };
+    if (e.t === "bin" && (e.op === "*" || e.op === "/")) {
+      const la = endoLead(e.a), lb = endoLead(e.b);
+      if (la >= 2 && lb === 0 && exoLead(e.b) === 0) return { ...e, a: longLeads(e.a) };
+      if (e.op === "*" && lb >= 2 && la === 0 && exoLead(e.a) === 0) return { ...e, b: longLeads(e.b) };
+    }
+    return auxFor(e);
+  };
+  eqs = eqs.map(q => ({ ...q, expr: longLeads(q.expr) }));
+
+  /* Lags beyond one period, and lagged shocks, through auxiliary variables
+   * (x_LAG1 = x(-1), then x(-2) is x_LAG1(-1), and so on). A lag involves
+   * no expectation, so here the variable alone is enough at any order. */
   const auxName = new Map();
   const chain = (name, kind, shift) => {            /* a variable standing for name(shift), |shift| >= 1 (or 0 for a shock) */
     const key = `${kind}:${name}:${shift}`;
@@ -759,8 +809,7 @@ export function parseMod(source) {
     aux.push({ name: nm, of: name, shift, def });
     return nm;
   };
-  try {
-  eqs = eqs.map(q => ({ ...q, expr: mapAst(q.expr, n => {
+  const longLags = e => mapAst(e, n => {
     if (n.t === "var" && Math.abs(n.shift) > 1) { const d = n.shift < 0 ? -1 : 1; return { t: "var", name: chain(n.name, "endo", n.shift - d), shift: d, line: n.line }; }
     if (n.t === "exo" && n.shift > 0) throw new ModError(`the shock '${n.name}' appears with a lead; shocks are not known in advance`, n.line);
     if (n.t === "exo" && n.shift < 0) {
@@ -768,8 +817,12 @@ export function parseMod(source) {
       return { t: "var", name: steps === 1 ? chain(n.name, "exo", 0) : chain(n.name, "exo", -(steps - 1)), shift: -1, line: n.line };
     }
     return null;
-  }) }));
+  });
+  try {
+    eqs = eqs.map(q => ({ ...q, expr: longLags(q.expr) }));
+    for (const a of leadAux) a.def = longLags(a.def);  /* a term moved back a period may now hold a longer lag */
   } catch (e) { if (!(e instanceof ModError)) throw e; fail(e.message, e.line); return result; }
+  aux.push(...leadAux);                             /* after the variables their definitions may use */
   const nOriginal = eqs.length;
   for (const a of aux) eqs.push({ expr: { t: "bin", op: "-", a: { t: "var", name: a.name, shift: 0 }, b: a.def }, text: "", name: "", line: 0, aux: true });
   for (const q of eqs) walkAst(q.expr, n => {
@@ -839,7 +892,7 @@ export function parseMod(source) {
   result.ok = true;
   result.model = {
     linear,
-    endo: endo.map(v => ({ ...v, aux: false })).concat(aux.map(a => ({ name: a.name, longName: a.shift === 0 ? `${a.of} (this period)` : `${a.of}(${a.shift > 0 ? "+" : ""}${a.shift})`, tex: "", aux: true, def: a.def }))),
+    endo: endo.map(v => ({ ...v, aux: false })).concat(aux.map(a => ({ name: a.name, longName: a.long || (a.shift === 0 ? `${a.of} (this period)` : `${a.of}(${a.shift > 0 ? "+" : ""}${a.shift})`), tex: "", aux: true, def: a.def }))),
     exo,
     params: defs.map(d => ({ ...d, longName: (params.find(p => p.name === d.name) || {}).longName || "" })),
     equations: eqs.map(q => ({ expr: q.expr, text: q.text, name: q.name, line: q.line, aux: !!q.aux })),

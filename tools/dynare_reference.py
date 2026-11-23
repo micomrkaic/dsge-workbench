@@ -7,9 +7,12 @@
 For each model this runs Dynare (under Octave) on the model file and writes
 test/reference/NAME.json: the steady state, the first-order decision rule,
 the eigenvalues, the impulse responses, and the theoretical moments and
-variance decomposition. The tests compare the workbench's numbers with
-these files; they are committed, so the tests need neither Dynare nor
-Octave.
+variance decomposition. A second run, stoch_simul(order=2), writes
+test/reference/NAME.order2.json: the second-order terms of the decision
+rule (ghxx, ghxu, ghuu, ghs2), the means to second order, and a pruned
+simulation for a fixed path of shocks. The tests compare the workbench's
+numbers with these files; they are committed, so the tests need neither
+Dynare nor Octave.
 
 The model file is used as it is up to the first computing command (the
 "cut" pattern in index.json); from there on it is replaced by a single
@@ -97,6 +100,115 @@ end
 """
 
 
+DUMP2 = r"""
+function dump_order2(outfile, T)
+  global M_ oo_ options_
+  n = M_.orig_endo_nbr; k = M_.exo_nbr;
+  dr = oo_.dr;
+  r = struct();
+  r.dynare = dynare_version();
+  r.endo = M_.endo_names(1:n)';
+  r.exo = M_.exo_names';
+  r.order = 1 + isfield(dr, 'ghxx');                % 1 if Dynare kept a linear model at first order
+  r.steady = dr.ys(1:n)';
+  back(dr.order_var) = 1:M_.endo_nbr;
+  states = dr.order_var(M_.nstatic + (1:M_.nspred));
+  r.state_names = M_.endo_names(states)';
+  % Dynare's auxiliary variables: what each stands for
+  aux = struct('name', {}, 'type', {}, 'of', {}, 'lag', {});
+  for q = 1:numel(M_.aux_vars)
+    a = M_.aux_vars(q);
+    aux(end + 1).name = M_.endo_names{a.endo_index};
+    aux(end).type = a.type;
+    if a.type == 1, aux(end).of = M_.endo_names{a.orig_index}; aux(end).lag = a.orig_lead_lag;
+    elseif a.type == 3, aux(end).of = M_.exo_names{a.orig_index}; aux(end).lag = a.orig_lead_lag;
+    else, aux(end).of = ''; aux(end).lag = 0; end
+  end
+  r.aux = aux;
+  r.sigma_e = M_.Sigma_e;
+  if r.order >= 2
+    g = dr.ghxx(back, :); r.ghxx = g(1:n, :);
+    g = dr.ghxu(back, :); r.ghxu = g(1:n, :);
+    g = dr.ghuu(back, :); r.ghuu = g(1:n, :);
+    g = dr.ghs2(back);    r.ghs2 = g(1:n)';
+    r.mean = oo_.mean(1:n)';
+    % a pruned simulation from the steady state for a fixed, reproducible path of shocks
+    cs = transpose(chol(M_.Sigma_e + 1e-14 * eye(k)));
+    cs(abs(cs) < 1e-10) = 0;
+    ex = zeros(T, k);
+    for t = 1:T, for j = 1:k, ex(t, :) = ex(t, :) + sin(1.3 * t + j) * cs(:, j)'; end, end
+    options_.pruning = true;
+    y = simult_(M_, options_, dr.ys, dr, ex, 2);
+    r.shock_path = ex;
+    r.sim = y(1:n, 2:end)';
+  end
+  fid = fopen(outfile, 'w');
+  fputs(fid, jsonencode(r));
+  fclose(fid);
+end
+"""
+SIM_T = 40
+
+
+def model_text(entry):
+    name = pathlib.Path(entry["file"]).stem
+    lines = (EXAMPLES / entry["file"]).read_text(encoding="utf-8").split("\n")
+    cut = next((i for i, line in enumerate(lines) if re.search(entry["cut"], line.strip())), None)
+    if cut is None:
+        raise SystemExit(f"{name}: no line matches the cut pattern {entry['cut']!r}")
+    return name, "\n".join(lines[:cut])
+
+
+def regular(x, rows, cols, name):
+    """jsonencode flattens 1 x n and n x 1 matrices: give every matrix its rows back."""
+    flat = []
+
+    def walk(v):
+        if isinstance(v, list):
+            for u in v:
+                walk(u)
+        else:
+            flat.append(v)
+    walk(x)
+    assert len(flat) == rows * cols, (name, len(flat), rows, cols)
+    return [flat[i * cols:(i + 1) * cols] for i in range(rows)]
+
+
+def reference2(entry):
+    name, head = model_text(entry)
+    model = head + "\n\nsteady(tolf=1e-13, tolx=1e-13);\nstoch_simul(order=2, irf=0, ar=1, nograph, noprint);\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        (tmp / f"{name}.mod").write_text(model, encoding="utf-8")
+        (tmp / "dump_order2.m").write_text(DUMP2)
+        out = tmp / "out.json"
+        cmd = f"dynare {name} nolog; dump_order2('{out}', {SIM_T});"
+        run = subprocess.run(["octave", "--no-gui", "--quiet", "--eval", cmd], cwd=tmp, capture_output=True, text=True)
+        if run.returncode != 0 or not out.exists():
+            sys.stderr.write(run.stdout[-3000:] + run.stderr[-3000:])
+            raise SystemExit(f"{name}: Dynare failed at order 2")
+        data = json.loads(out.read_text())
+    for key in ("exo", "state_names", "steady"):
+        if not isinstance(data[key], list):
+            data[key] = [data[key]]
+    if isinstance(data["aux"], dict):
+        data["aux"] = [data["aux"]]
+    n, k, nx = len(data["endo"]), len(data["exo"]), len(data["state_names"])
+    data["sigma_e"] = regular(data["sigma_e"], k, k, name)
+    if data["order"] >= 2:
+        data["ghxx"] = regular(data["ghxx"], n, nx * nx, name)
+        data["ghxu"] = regular(data["ghxu"], n, nx * k, name)
+        data["ghuu"] = regular(data["ghuu"], n, k * k, name)
+        data["ghs2"] = regular(data["ghs2"], 1, n, name)[0]
+        data["mean"] = regular(data["mean"], 1, n, name)[0]
+        data["shock_path"] = regular(data["shock_path"], SIM_T, k, name)
+        data["sim"] = regular(data["sim"], SIM_T, n, name)
+    data["model"] = entry["file"]
+    (OUT / f"{name}.order2.json").write_text(json.dumps(data, separators=(",", ":")) + "\n")
+    what = "second order" if data["order"] >= 2 else "linear model: Dynare stays at first order"
+    print(f"{name}: order 2 -> test/reference/{name}.order2.json ({what}, {nx} states)")
+
+
 def reference(entry):
     name = pathlib.Path(entry["file"]).stem
     text = (EXAMPLES / entry["file"]).read_text(encoding="utf-8")
@@ -161,6 +273,7 @@ def main():
     for entry in entries:
         if not want or pathlib.Path(entry["file"]).stem in want:
             reference(entry)
+            reference2(entry)
 
 
 if __name__ == "__main__":
