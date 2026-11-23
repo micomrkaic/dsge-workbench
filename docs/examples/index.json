@@ -20,6 +20,12 @@
   { "file": "NK_baseline.mod", "title": "Fernandez-Villaverde (2010), baseline New Keynesian",
     "about": "A medium-scale model in nonlinear form: 28 variables, five shocks, sticky prices and wages, habits, adjustment costs and trend growth.",
     "source": "Model block from Dynare 6.0, examples/NK_baseline.mod (Benjamin Born and Johannes Pfeifer); its separate steady-state file written into the model file.", "cut": "^steady;" },
+  { "file": "zlb.mod", "title": "New Keynesian at the zero lower bound", "occbin": true,
+    "about": "The three-equation model with a floor on the policy rate: an occasionally binding constraint, simulated in the Constraint tab.",
+    "source": "Written for the workbench.", "cut": "^shocks\\(surprise" },
+  { "file": "irreversible.mod", "title": "Irreversible investment (Guerrieri and Iacoviello)", "occbin": true,
+    "about": "A growth model in which investment cannot fall below a floor; the constraint binds after a run of bad shocks.",
+    "source": "Model block from Dynare 6.0, examples/Occbin_example.mod, with its irreversibility constraint only.", "cut": "^steady;" },
   { "file": "Smets_Wouters_2007.mod", "title": "Smets and Wouters (2007)",
     "about": "The medium-scale model of the US economy: forty variables, seven shocks, sticky prices and wages, at the posterior mode.",
     "source": "Johannes Pfeifer's DSGE_mod collection, Smets_Wouters_2007_45.mod, unmodified; its estimation commands are passed over.", "cut": "^estimated_params;" }

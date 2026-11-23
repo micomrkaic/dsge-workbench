@@ -7,13 +7,16 @@
  *
  * Part of dsge-workbench. Copyright (C) 2026 Mico Mrkaic.
  * GPL-3.0-or-later; see LICENSE. */
-import { parseMod } from "./modfile.js";
+import { parseMod, printAst } from "./modfile.js";
 import { Workbench, standaloneScript } from "./solve.js";
 import { EngineClient } from "./engine.js";
 import { h, svg, fmt, lineChart, rootsChart, stackedBars, heatmap, legend, SERIES, hideTip } from "./charts.js";
 
 const $ = id => document.getElementById(id);
-const TABS = ["Summary", "Impulse responses", "Moments", "Variance", "Simulation", "Decision rule", "Cozy script"];
+const BASE_TABS = ["Summary", "Impulse responses", "Moments", "Variance", "Simulation", "Decision rule", "Cozy script"];
+const TABS = [...BASE_TABS.slice(0, 5), "Constraint", ...BASE_TABS.slice(5)];
+/* The Constraint tab is there for a model that declares an occasionally binding constraint. */
+const tabsNow = () => (state.model && state.model.constraints.length ? TABS : BASE_TABS);
 const STORE = "dsge-workbench:";
 
 const state = {
@@ -30,6 +33,9 @@ const state = {
   vars: null,                           /* names shown in charts and tables */
   relTo: null,                          /* moments: standard deviations relative to this variable */
   sim: { T: 200, seed: 1, path: null, vars: [], slots: {}, part: "total" },      /* part: which of a second-order path is drawn */
+  /* the simulation with an occasionally binding constraint: the file's surprise shocks or one innovation of
+   * `size` standard deviations in period 1, over T periods; levels or deviations; the result, or why there is none */
+  occ: { mode: "file", shock: 0, size: -3, T: 40, units: "level", result: null, error: "" },
   table: false,
 };
 const engine = new EngineClient();
@@ -105,6 +111,7 @@ function setText(value, name) {
   if (name) state.fileName = name;
   state.overrides = {}; state.sd = null; state.pinned = null; state.vars = null; state.relTo = null; state.shock = 0; state.size = 1;
   state.sim.vars = []; state.sim.slots = {}; state.sim.path = null;
+  freshText = true;
   paint();
   store("text", value);
   store("name", state.fileName);
@@ -113,7 +120,7 @@ function setText(value, name) {
 }
 
 /* ---- from text to results ---------------------------------------------- */
-let running = false, again = false, textDirty = false;
+let running = false, again = false, textDirty = false, freshText = false;
 function textChanged() { textDirty = true; run(); }
 async function run() {
   if (running) { again = true; return; }
@@ -135,6 +142,14 @@ async function step() {
     state.loadError = "";
     paintGutter();
     if (state.model) carryOver(before, state.model);
+    if (state.model && freshText) {
+      /* a file just opened: at the order it asks for, with its own scenario for its constraint */
+      if (state.model.hints.order === 2 && !state.model.linear) state.order = 2;
+      const o = state.model.occbin;
+      state.occ = { ...state.occ, mode: o && o.shocks ? "file" : "one", shock: 0, size: -3, units: "level", result: null, error: "",
+        T: state.model.hints.occbinT || (o && o.shocks ? Math.max(40, o.shocks.length + 20) : 40) };
+    }
+    freshText = false;
     renderMessages();
     renderParams();
     if (!state.model) { state.result = null; loadedModel = null; render(); return; }
@@ -155,7 +170,9 @@ async function step() {
   state.solving = false;
   state.result = r;
   state.sim.path = null;
+  state.occ.result = null; state.occ.error = "";
   if (r.ok && r.determinate && state.tab === "Simulation") await simulate();
+  if (r.ok && r.determinate && state.tab === "Constraint") await constrain();
   updateDerived();
   render();
 }
@@ -173,6 +190,8 @@ function carryOver(before, model) {
   const same = before && state.sd && before.exo.length === model.exo.length && before.exo.every((s, j) => s.name === model.exo[j].name && before.shocks.sd[j] === model.shocks.sd[j]);
   if (!same) state.sd = null;
   if (state.shock >= model.exo.length) state.shock = 0;
+  if (state.occ.shock >= model.exo.length) state.occ.shock = 0;
+  if (state.occ.mode === "file" && !(model.occbin && model.occbin.shocks)) state.occ.mode = "one";
   state.horizon = state.horizon && before ? state.horizon : model.hints.irf;
   const names = model.endo.filter(v => !v.aux).map(v => v.name);
   if (!state.vars || !state.vars.every(n => names.includes(n))) state.vars = names.slice(0, 16);
@@ -298,12 +317,13 @@ function renderStatus() {
   box.append(h("span", { class: "dim", text: `${r.order === 2 ? "second order, " : ""}solved in ${r.ms} ms by Cozy ${engine.version}` }));
 }
 function renderTabs() {
-  $("tabs").replaceChildren(...TABS.map(t => h("button", { type: "button", role: "tab", "aria-selected": String(t === state.tab), text: t, onclick: () => openTab(t) })));
+  $("tabs").replaceChildren(...tabsNow().map(t => h("button", { type: "button", role: "tab", "aria-selected": String(t === state.tab), text: t, onclick: () => openTab(t) })));
 }
 async function openTab(t) {
   state.tab = t;
   store("tab", t);
   if (t === "Simulation" && !state.sim.path && solved()) await simulate();
+  if (t === "Constraint" && !state.occ.result && solved()) await constrain();
   render();
 }
 const solved = () => state.result && state.result.ok && state.result.determinate;
@@ -361,6 +381,7 @@ function viewSummary(view) {
   view.append(h("div", { class: "tiles" },
     tile("Variables", n - aux, aux ? `plus ${aux} auxiliary` : m.linear ? "linear model" : ""),
     tile("Shocks", m.exo.length),
+    m.constraints.length ? tile("Constraints", m.constraints.length, m.occbin ? `'${m.occbin.name}': see the Constraint tab` : "more than the one the workbench simulates") : null,
     tile("Forward-looking", r.forward, "appear with a lead"),
     tile("State variables", r.backward, "appear with a lag"),
     tile("Unstable roots", r.unstable, r.determinate ? "as many as needed" : `${r.forward} needed`),
@@ -542,6 +563,97 @@ function viewSimulation(view) {
       : `One random path of ${s.T} periods from the steady state, as deviations from it${series.length === 1 ? ` (${series[0].name})` : ""}${s2 && part === "total" ? ", to second order with pruning: the first-order path feeds the second-order correction and never the other way, so the path cannot explode" : ""}. The CSV holds every variable, in levels.`) + " The same seed gives the same path." }));
 }
 
+/* ---- Constraint -------------------------------------------------------------- */
+/* The shocks of the run, one row per period in the shocks' own units: the
+ * file's, or one orthogonalised innovation of `size` standard deviations in
+ * period 1 (the innovation of the impulse responses). */
+function scenarioShocks() {
+  const m = state.model, o = state.occ, { sd, corr } = shocksNow(), k = m.exo.length;
+  if (o.mode === "file" && m.occbin.shocks) return m.occbin.shocks;
+  const L = corr.map(row => row.map(() => 0));        /* Cholesky factor of the correlations */
+  for (let i = 0; i < k; i++) for (let j = 0; j <= i; j++) {
+    let sum = corr[i][j];
+    for (let q = 0; q < j; q++) sum -= L[i][q] * L[j][q];
+    L[i][j] = i === j ? Math.sqrt(Math.max(sum, 0)) : (L[j][j] > 0 ? sum / L[j][j] : 0);
+  }
+  return [m.exo.map((_, i) => o.size * sd[i] * L[i][o.shock])];
+}
+const scenarioNow = () => ({ shocks: scenarioShocks(), T: state.occ.T, ahead: state.model.hints.occbinAhead || 100 });
+async function constrain() {
+  const o = state.occ;
+  o.result = null; o.error = "";
+  if (!solved() || !state.model.occbin) return;
+  try { const s = scenarioNow(); o.result = await wb.occbin(s.shocks, { T: s.T, ahead: s.ahead }); }
+  catch (e) { o.error = e.message; }
+}
+/* Runs of true in a list, as [first, last] positions. */
+const runs = flags => { const out = []; flags.forEach((f, t) => { if (!f) return; if (out.length && out.at(-1)[1] === t - 1) out.at(-1)[1] = t; else out.push([t, t]); }); return out; };
+function viewConstraint(view) {
+  const m = state.model, r = state.result, o = state.occ;
+  if (!m) { view.append(noSolution()); return; }
+  if (!m.occbin) {
+    view.append(h("p", { class: "empty", text: `This model declares ${m.constraints.length} occasionally binding constraints (${m.constraints.join(", ")}). The workbench simulates models with one; the other tabs show this model with none of them binding.` }));
+    return;
+  }
+  /* the conditions as the file wrote them: a hidden steady-state parameter is shown as steady_state(x) */
+  const ssOf = new Map(m.ssParams.map(s => [s.name, s.of]));
+  const show = e => printAst(e, n => (ssOf.has(n.name) ? `steady_state(${ssOf.get(n.name)})` : n.name));
+  view.append(h("div", { class: "condition" },
+    h("strong", { text: `Constraint '${m.occbin.name}'` }), " binds when ", h("code", { text: show(m.occbin.bind) }),
+    m.occbin.relax ? [" and is released when ", h("code", { text: show(m.occbin.relax) }), "."] : " and is released when that is no longer so.",
+    h("div", { class: "dim", text: "The equations tagged relax hold while it is slack, and those tagged bind replace them while it binds. Every other tab shows the model with the constraint slack." })));
+  if (!solved()) { view.append(noSolution()); return; }
+  const sd = shocksNow().sd, redo = async () => { await constrain(); render(); };
+  const fromFile = !!m.occbin.shocks, one = o.mode !== "file" || !fromFile;
+  const names = shown();
+  const level = o.units === "level";
+  const value = (rows, t, i) => rows[t][i] - (level ? 0 : r.steady[i]);
+  const cards = () => [...view.querySelectorAll(".card")].map(c => ({ title: c.dataset.name, sub: c.dataset.sub, chart: c.querySelector("svg") }));
+  const res = o.result;
+  view.append(h("div", { class: "bar" },
+    fromFile ? h("div", { class: "seg", role: "group", "aria-label": "Shocks" },
+      h("button", { type: "button", class: one ? "" : "on", text: "The file's shocks", title: "The surprise shocks of the model file's shocks(surprise) block", onclick: () => { o.mode = "file"; redo(); } }),
+      h("button", { type: "button", class: one ? "on" : "", text: "One shock", title: "A single innovation in period 1", onclick: () => { o.mode = "one"; redo(); } })) : null,
+    one ? h("label", {}, "Shock", h("select", { "aria-label": "Shock", onchange: e => { o.shock = +e.target.value; redo(); } },
+      m.exo.map((x, j) => h("option", { value: j, selected: j === o.shock, text: `${x.name}${x.longName ? " — " + x.longName : ""}${sd[j] === 0 ? " (size 0)" : ""}` })))) : null,
+    one ? h("label", { title: "The size of the innovation in period 1, in standard deviations; negative for a shock the other way" }, "Size",
+      h("input", { type: "number", step: 0.5, min: -50, max: 50, value: o.size, "aria-label": "Shock size in standard deviations", onchange: e => { const v = Math.max(-50, Math.min(50, +e.target.value)); o.size = Number.isFinite(v) ? v : -3; redo(); } }), "s.d.") : null,
+    h("label", {}, "Periods", h("input", { type: "number", min: 4, max: 400, step: 1, value: o.T, "aria-label": "Periods simulated", onchange: e => { o.T = Math.max(4, Math.min(400, Math.round(+e.target.value) || 40)); redo(); } })),
+    h("div", { class: "seg", role: "group", "aria-label": "Units" },
+      h("button", { type: "button", class: level ? "on" : "", text: "Level", onclick: () => { o.units = "level"; render(); } }),
+      h("button", { type: "button", class: level ? "" : "on", text: "Deviation", title: "From the steady state", onclick: () => { o.units = "dev"; render(); } })),
+    h("span", { class: "spacer" }),
+    h("button", { type: "button", class: "small" + (state.table ? " on" : ""), text: "Table", title: "Show the numbers instead of the charts", onclick: () => { state.table = !state.table; render(); } }),
+    exportButtons(() => res && download(`${stem()}-constraint.csv`, csv([["period", "binding", ...names.flatMap(nm => [nm, `${nm} (ignoring the constraint)`])],
+      ...res.path.map((_, t) => [t + 1, res.binding[t] ? 1 : 0, ...names.flatMap(nm => [value(res.path, t, indexOf(nm)), value(res.linear, t, indexOf(nm))])])]), "text/csv"), state.table || !res ? null : cards)));
+  if (o.error) { view.append(h("div", { class: "verdict bad" }, h("strong", { text: "No path was found" }), h("span", { text: o.error }))); return; }
+  if (!res) { view.append(h("p", { class: "empty", text: "Simulating…" })); return; }
+  const bands = runs(res.binding), bound = res.binding.filter(Boolean).length;
+  const spans = bands.map(([a, b]) => (a === b ? `${a + 1}` : `${a + 1}–${b + 1}`)).join(", ");
+  view.append(h("div", { class: "verdict" },
+    h("strong", { text: bound ? `The constraint binds in ${bound} of ${res.path.length} periods` : "The constraint never binds" }),
+    h("span", { text: bound ? `Period${bands.length === 1 && bands[0][0] === bands[0][1] ? "" : "s"} ${spans}. Where the two lines part, the constraint is changing the outcome, in the periods it binds and in those before and after.` : "With these shocks the path is the linear one. Try a larger shock, or one of the other sign." })));
+  view.append(legend([{ name: "with the constraint", color: SERIES[0] }, { name: "ignoring it", color: SERIES[1], dashed: true }, ...(bound ? [{ name: "periods in which it binds", color: SERIES[1], kind: "box", faint: true }] : [])]));
+  const picker = chips(state.vars, toggleVar, allNone());
+  if (picker) view.append(picker);
+  if (!names.length) { view.append(h("p", { class: "empty", text: "Choose variables above." })); return; }
+  if (state.table) {
+    view.append(table(["Period", "Binds", ...names.flatMap(nm => [nm, `${nm}, ignoring it`])],
+      res.path.map((_, t) => ({ cells: [String(t + 1), res.binding[t] ? "yes" : "", ...names.flatMap(nm => [value(res.path, t, indexOf(nm)), value(res.linear, t, indexOf(nm))])] })), { text: [1] }));
+  } else {
+    const group = { charts: [] };
+    view.append(h("div", { class: "multiples" }, names.map(nm => {
+      const i = indexOf(nm), sub = (longOf(nm) || "") + (level ? "" : (longOf(nm) ? ", " : "") + "deviation from the steady state");
+      const series = [{ name: "ignoring it", color: SERIES[1], dashed: true, values: res.linear.map((_, t) => value(res.linear, t, i)) },
+        { name: "with the constraint", color: SERIES[0], values: res.path.map((_, t) => value(res.path, t, i)) }];
+      return h("div", { class: "card", "data-name": nm, "data-sub": sub }, h("h4", { text: nm }), h("div", { class: "sub", text: sub }),
+        lineChart(series, { group, title: nm, period: "period", x0: 1, bands, zero: !level ? true : false, label: `path of ${nm} with and without the constraint` }));
+    })));
+  }
+  const what = one ? `an innovation of ${fmt(o.size, 3)} standard deviation${Math.abs(o.size) === 1 ? "" : "s"} in ${m.exo[o.shock].name} in period 1` : "the surprise shocks of the model file";
+  view.append(h("p", { class: "foot", text: `The path from the steady state for ${what}, by the piecewise-linear method of Guerrieri and Iacoviello (2015), the method of Dynare's OccBin: in each period agents expect no further shocks, and the periods in which the constraint will bind are guessed and checked until the guess agrees with the path. The model is linear within each regime, so this is not the second-order solution; the order switch does not change it.` }));
+}
+
 /* ---- Decision rule --------------------------------------------------------- */
 function viewRule(view) {
   if (!solved()) { view.append(noSolution()); return; }
@@ -580,7 +692,7 @@ function viewRule(view) {
 function viewCozy(view) {
   const r = state.result;
   if (!state.model || !r || !r.ok) { view.append(noSolution()); return; }
-  const script = standaloneScript(state.model, r, shocksNow(), state.title || stem());
+  const script = standaloneScript(state.model, r, shocksNow(), state.title || stem(), state.model.occbin && r.determinate ? scenarioNow() : null);
   view.append(h("div", { class: "bar" },
     h("span", { class: "dim", text: "The same model at these parameter values, as a script for Cozy. It runs in the command-line interpreter and in Cozy's playground." }),
     h("span", { class: "spacer" }),
@@ -589,9 +701,10 @@ function viewCozy(view) {
     h("pre", { class: "source", text: script }));
 }
 
-const VIEWS = { "Summary": viewSummary, "Impulse responses": viewIrf, "Moments": viewMoments, "Variance": viewVardecomp, "Simulation": viewSimulation, "Decision rule": viewRule, "Cozy script": viewCozy };
+const VIEWS = { "Summary": viewSummary, "Impulse responses": viewIrf, "Moments": viewMoments, "Variance": viewVardecomp, "Simulation": viewSimulation, "Constraint": viewConstraint, "Decision rule": viewRule, "Cozy script": viewCozy };
 function render() {
   hideTip();
+  if (!tabsNow().includes(state.tab)) state.tab = "Summary";      /* a tab the model in hand does not have */
   renderStatus();
   renderTabs();
   const view = $("view"), top = view.scrollTop;
@@ -619,7 +732,7 @@ function exportFigure(cards, kind) {
     .tick{fill:${tok("--muted")};font-size:10.5px}.label{fill:${tok("--ink-2")};font-size:11.5px;font-family:ui-monospace,Menlo,Consolas,monospace}
     .note{fill:${tok("--muted")};font-size:11px}.line{stroke-width:2;stroke-linejoin:round;stroke-linecap:round;fill:none}
     .line.dashed{stroke-dasharray:5 4;stroke-width:1.5}.cross,.dot{display:none}.unit{stroke:${tok("--ink-2")};stroke-width:1.5}
-    .band{fill:${tok("--wash")}}.root{stroke:${tok("--raised")};stroke-width:2}.root.stable{fill:${tok("--series-1")}}.root.unstable{fill:${tok("--series-2")}}
+    .band{fill:${tok("--wash")}}.bind{fill:${tok("--series-2")};fill-opacity:0.13}.root{stroke:${tok("--raised")};stroke-width:2}.root.stable{fill:${tok("--series-1")}}.root.unstable{fill:${tok("--series-2")}}
     .t{fill:${tok("--ink")};font-size:12.5px;font-weight:600;font-family:ui-monospace,Menlo,Consolas,monospace}.s{fill:${tok("--muted")};font-size:11px}`;
   svg("rect", { width: W, height: H, fill: tok("--raised") }, out);
   cards.forEach((c, i) => {
@@ -727,9 +840,10 @@ $("about-open").addEventListener("click", async () => {
     try {
       const rows = await (await fetch("validation.json")).json();
       const sci = v => v.toExponential(1).replace("e-", " × 10^−");
-      t.append(h("thead", {}, h("tr", {}, ["Model", "Variables", "Shocks", "First order", "Second order"].map((c, i) => h("th", { class: i === 0 ? "text" : "", text: c })))),
+      t.append(h("thead", {}, h("tr", {}, ["Model", "Variables", "Shocks", "First order", "Second order", "Constraint"].map((c, i) => h("th", { class: i === 0 ? "text" : "", text: c })))),
         h("tbody", {}, rows.models.map(r => h("tr", {}, h("td", { class: "text", text: r.title }), h("td", { text: String(r.variables) }), h("td", { text: String(r.shocks) }), h("td", { text: sci(r.worst) }),
-          h("td", { class: r.second === null ? "none" : "", text: r.second === null ? "linear" : sci(r.second) })))));
+          h("td", { class: r.second === null ? "none" : "", text: r.second === null ? "linear" : sci(r.second) }),
+          h("td", { class: r.occbin === undefined ? "none" : "", text: r.occbin === undefined ? "" : sci(r.occbin) })))));
     } catch { /* the table is a nicety */ }
   }
   $("about").showModal();

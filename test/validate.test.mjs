@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { compareWithDynare, compareSecondOrder } from "./compare.mjs";
+import { compareWithDynare, compareSecondOrder, compareOccbin } from "./compare.mjs";
 import { startEngine } from "./engine-node.mjs";
 
 const here = new URL(".", import.meta.url);
@@ -34,6 +34,19 @@ for (const ex of examples) {
     if (linear) { console.log(`  ${name}: a linear model, no second-order terms in either program`); return; }
     const worst = Math.max(...Object.values(report));
     console.log(`  ${name}: ${states} states; largest relative difference ${worst.toExponential(1)} (` +
+      Object.entries(report).map(([key, v]) => `${key} ${v.toExponential(0)}`).join(", ") + ")");
+    for (const [key, v] of Object.entries(report)) assert.ok(v < 1e-6, `${key} differs from Dynare by ${v.toExponential(2)}`);
+  });
+}
+
+// ... and the models with an occasionally binding constraint against
+// Dynare's OccBin, for the surprise shocks their files give.
+for (const ex of examples.filter(e => e.occbin)) {
+  const name = ex.file.replace(/\.mod$/, "");
+  test(`${name}: matches Dynare's OccBin`, async () => {
+    const { periods, bound, report } = await compareOccbin(engine, ex);
+    const worst = Math.max(...Object.values(report));
+    console.log(`  ${name}: ${periods} periods, the constraint binds in ${bound}; largest relative difference ${worst.toExponential(1)} (` +
       Object.entries(report).map(([key, v]) => `${key} ${v.toExponential(0)}`).join(", ") + ")");
     for (const [key, v] of Object.entries(report)) assert.ok(v < 1e-6, `${key} differs from Dynare by ${v.toExponential(2)}`);
   });

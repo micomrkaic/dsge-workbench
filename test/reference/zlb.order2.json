@@ -1,0 +1,1 @@
+{"dynare":"6.0","endo":["x","pi","i","inot","rn"],"exo":["en"],"order":1,"steady":[0,0,1,1,1],"state_names":["rn"],"aux":[],"sigma_e":[[0.25]],"model":"zlb.mod"}

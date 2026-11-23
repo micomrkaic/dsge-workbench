@@ -135,8 +135,8 @@ details.notes summary { padding: 6px 14px; cursor: pointer; color: var(--ink-2);
 .badge.busy { background: var(--wash); color: var(--ink-2); }
 .status .dim { margin-left: auto; }
 @media (max-width: 520px) { .status { flex-wrap: wrap; } }
-.tabs { display: flex; gap: 2px; padding: 6px 12px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
-.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; background: none; padding: 7px 10px; color: var(--ink-2); white-space: nowrap; font-size: 13.5px; }
+.tabs { display: flex; gap: 0; padding: 6px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; background: none; padding: 7px 9px; color: var(--ink-2); white-space: nowrap; font-size: 13.5px; }
 .tabs button:hover { color: var(--ink); background: var(--wash); }
 .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 650; }
 .view { flex: 1; overflow: auto; padding: 16px; }
@@ -180,6 +180,7 @@ svg.chart.heat { width: auto; max-width: none; }
 .chart .line { stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart .line.dashed { stroke-dasharray: 5 4; stroke-width: 1.5; }
 .chart .line.thin { stroke-width: 1.5; }
+.chart .bind { fill: var(--series-2); fill-opacity: 0.13; }
 .chart .cross { stroke: var(--muted); stroke-width: 1; }
 .chart .dot { stroke: var(--raised); stroke-width: 2; }
 .chart .unit { stroke: var(--ink-2); stroke-width: 1.5; }
@@ -193,6 +194,9 @@ svg.chart.heat { width: auto; max-width: none; }
 .key.line { width: 16px; height: 0; border-top: 2px solid var(--c); }
 .key.line.dashed { border-top-style: dashed; }
 .key.box { width: 11px; height: 11px; border-radius: 2px; background: var(--c); }
+.key.box.faint { opacity: 0.3; }
+.condition { background: var(--raised); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; line-height: 1.55; }
+.condition code { font-family: var(--mono); font-size: 12.5px; background: var(--wash); padding: 1px 5px; border-radius: 4px; }
 .scale { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 8px; }
 .scale i { width: 160px; height: 10px; border-radius: 2px; background: linear-gradient(to right, var(--div-neg), var(--div-mid), var(--div-pos)); }
 .tip { position: fixed; z-index: 20; pointer-events: none; background: var(--raised); color: var(--ink); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 12.5px; box-shadow: 0 6px 20px rgba(0, 0, 0, .18); max-width: 320px; }

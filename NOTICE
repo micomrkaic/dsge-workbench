@@ -26,6 +26,13 @@ docs/examples/NK_baseline.mod
     separate file NK_baseline_steadystate.m written into the model file);
     the file's header says so.
 
+docs/examples/irreversible.mod
+    From the examples distributed with Dynare 6.0 (Occbin_example.mod),
+    after an example by Luca Guerrieri and Matteo Iacoviello. Copyright (C)
+    2021 Dynare Team. GPL-3.0-or-later. Modified for the workbench (one of
+    its two constraints kept, its surprise shocks changed); the file's
+    header says so.
+
 docs/examples/Smets_Wouters_2007.mod
     Smets_Wouters_2007_45.mod from Johannes Pfeifer's DSGE_mod collection,
     unmodified. Copyright (C) 2007-2013 Frank Smets and Raf Wouters,

@@ -89,7 +89,7 @@ export function modelSource(model, opt = {}) {
   const nm = namer(model), c = nm.c;
   const values = new Map(model.params.map(p => [p.name, p.value]));
   for (const [name, v] of Object.entries(opt.values || {})) values.set(name, v);      /* a standalone script fixes the values */
-  for (const q of model.equations) walkAst(q.expr, n => {
+  for (const q of [...model.equations, ...(model.occbin ? model.occbin.equations : [])]) walkAst(q.expr, n => {
     if (n.t === "bin" && ["<", ">", "<=", ">=", "==", "!="].includes(n.op))
       throw new Error(`equation at line ${q.line}: comparisons (${n.op}) inside a model equation are not supported`);
   });
@@ -118,7 +118,9 @@ export function modelSource(model, opt = {}) {
     fields.push(`init = {${model.endo.map(v => `${c(v.name)} = ${cozyNum(init.has(v.name) ? init.get(v.name) : 0)}`).join(", ")}}`);
     wbInit = initFunction(model, nm, lets);
   }
-  fields.push(`model = [${model.equations.map(q => `"${printAst(q.expr, nm.equation)}"`).join(";\n    ")}]`);
+  const equationsOf = eqs => `model = [${eqs.map(q => `"${printAst(q.expr, nm.equation)}"`).join(";\n    ")}]`;
+  const common = fields.slice();                    /* everything but the equations: the two regimes of a constraint share it */
+  fields.push(equationsOf(model.equations));
 
   /* base parameters come in; the others follow from them, in the order they were written */
   const ordered = model.params.map(p => (p.base ? `let ${c(p.name)} = b__.${c(p.name)};` : `let ${c(p.name)} = ${printAst(p.expr, nm.value)};`));
@@ -137,8 +139,23 @@ export function modelSource(model, opt = {}) {
   }
   if (opt.sd) fields.splice(3, 0, `sd = {${model.exo.map((s, j) => `${c(s.name)} = ${cozyNum(opt.sd[j])}`).join(", ")}}`);
   const spec = `{\n  ${fields.join(",\n  ")}}`;
-  const src = `let wb_m = dsge.model(${spec});\n${wbPar}\n${wbSs}\n${wbInit}`;
-  return { src, spec, pnames, steadyKind, initFollows: wbInit !== "" };
+  let src = `let wb_m = dsge.model(${spec});\n${wbPar}\n${wbSs}\n${wbInit}`;
+
+  /* An occasionally binding constraint: the model of the regime in which it
+   * binds (wb_alt: the same variables, shocks, parameters and steady state,
+   * other equations), and its two conditions as functions of a path, a
+   * record of columns in levels, once the parameters are given. */
+  let occbin = null;
+  if (model.occbin) {
+    const o = model.occbin;
+    const altSpec = `{\n  ${[...common, equationsOf(o.equations)].join(",\n  ")}}`;
+    const onPath = n => (n.t === "var" ? `v__.${c(n.name)}` : c(n.name));
+    const used = e => { const names = new Set(); walkAst(e, n => { if (n.t === "par") names.add(n.name); }); return [...names].map(name => `let ${c(name)} = p__.${c(name)};`).join(" "); };
+    const condition = e => `fn p__ -> fn v__ -> (${used(e)} ${printAst(e, onPath)})`;
+    occbin = { altSpec, bind: condition(o.bind), relax: o.relax ? condition(o.relax) : "" };
+    src += `let wb_alt = dsge.model(${altSpec});\nlet wb_bind = ${occbin.bind};\n${o.relax ? `let wb_relax = ${occbin.relax};\n` : ""}`;
+  }
+  return { src, spec, pnames, steadyKind, initFollows: wbInit !== "", occbin };
 }
 
 /* The first line of a Cozy error, without the position and the package's
@@ -322,6 +339,34 @@ let wb_pt = dg_path2(wb_s2, wb_E); let wb_Y1 = wb_pt.Y1; let wb_Y2 = wb_pt.Y2;`,
     return { first: rows(r.values.wb_Y1), second: rows(r.values.wb_Y2) };
   }
 
+  /* A model with an occasionally binding constraint, simulated by Guerrieri
+   * and Iacoviello's piecewise-linear method (the package's dsge.occbin), at
+   * the parameter values of the last solve. shocks has one row per period
+   * and one column per shock, in the shocks' own units; each row is a
+   * surprise. Returns {path, linear, binding, iterations}: the path with the
+   * constraint and the path ignoring it (T rows of levels, a column per
+   * variable), the periods in which it binds, and the regime guesses each
+   * period took. Throws with Cozy's message if no path is found. */
+  async occbin(shocks, options = {}) {
+    const model = this.model, c = name => model.cozy.get(name) || name;
+    if (!model.occbin) throw new Error("this model declares no occasionally binding constraint");
+    if (!model.exo.length) throw new Error("the model has no shocks to simulate");
+    const T = Math.max(1, Math.min(2000, Math.round(options.T || shocks.length || 40)));
+    const rows = shocks.slice(0, T), ahead = Math.max(10, Math.min(2000, Math.round(options.ahead || 100)));
+    const columns = model.exo.map((x, j) => `${c(x.name)} = [${(rows.length ? rows : [new Array(model.exo.length).fill(0)]).map(r => cozyNum(r[j] || 0)).join("; ")}]`);
+    const names = model.endo.map(v => c(v.name));
+    const r = await this.engine.exec({
+      src: `let wb_o = dsge.occbin(wb_m, wb_alt, {shocks = {${columns.join(", ")}}, bind = wb_bind(wb_p), ${model.occbin.relax ? "relax = wb_relax(wb_p), " : ""}T = ${T}, horizon = ${ahead}, over = wb_p});
+let wb_oP = [${names.map(n => `wb_o.path.${n}`).join(", ")}];
+let wb_oL = [${names.map(n => `wb_o.linear.${n}`).join(", ")}];
+let wb_oB = pick(wb_o.binding, 1.0, 0.0); let wb_oI = wb_o.iterations;`,
+      read: ["wb_oP", "wb_oL", "wb_oB", "wb_oI"],
+    });
+    if (!r.ok) throw new Error(cozyMessage(r.output));
+    const w = r.values, rowsOf = m => Array.from({ length: m.rows }, (_, i) => Array.from(m.data.slice(i * m.cols, (i + 1) * m.cols)));
+    return { path: rowsOf(w.wb_oP), linear: rowsOf(w.wb_oL), binding: Array.from(w.wb_oB.data, v => v > 0.5), iterations: Array.from(w.wb_oI.data) };
+  }
+
   /* A simulated path of T periods (deviations from the steady state). After
    * a solve at order 2 of a model that is not linear, pass second = true for
    * the pruned second-order path of the same draws: the result is then
@@ -345,7 +390,7 @@ let wb_pt = dg_path2(wb_s2, wb_E); let wb_Y1 = wb_pt.Y1; let wb_Y2 = wb_pt.Y2;`,
 /* A script that reproduces a result in Cozy itself (the command-line
  * interpreter or its playground), using only the dsge package's public
  * functions, with the parameters fixed at the values of that result. */
-export function standaloneScript(model, result, shocks, title) {
+export function standaloneScript(model, result, shocks, title, scenario = null) {
   const c = name => model.cozy.get(name) || name;
   const sd = shocks ? shocks.sd : model.shocks.sd, corr = shocks ? shocks.corr : model.shocks.corr;
   const m = modelSource(model, { values: result.params, sd });
@@ -381,6 +426,20 @@ export function standaloneScript(model, result, shocks, title) {
   } else if (result.determinate) {
     lines.push(`let s = dsge.solve(m);              % steady state and decision rule y = P y(-1) + Q e`, `s.ss`);
     if (first) lines.push(`dsge.irf(s, "${c(first.name)}", ${Math.min(result.horizon, 20)})     % responses to one standard deviation of ${first.name}`);
+  }
+  if (result.determinate && m.occbin && scenario && scenario.shocks.length) {
+    const o = model.occbin, T = scenario.T || scenario.shocks.length;
+    const cols = model.exo.map((x, j) => [c(x.name), scenario.shocks.map(r => r[j] || 0)]).filter(([, v]) => v.some(z => z !== 0));
+    lines.push(``,
+      `% The constraint '${o.name}', by the piecewise-linear method of Guerrieri and Iacoviello (OccBin):`,
+      `% m is the model while it is slack, alt the model while it binds.`,
+      `let alt = dsge.model(${m.occbin.altSpec});`,
+      `let bind = (${m.occbin.bind})(s.params);       % where, with the constraint slack, it is violated`,
+      ...(o.relax ? [`let relax = (${m.occbin.relax})(s.params);     % where, with it binding, it no longer would`] : []),
+      `let r = dsge.occbin(m, alt, {shocks = {${(cols.length ? cols : [[c(model.exo[0].name), [0]]]).map(([nm, v]) => `${nm} = [${v.map(cozyNum).join("; ")}]`).join(", ")}}, bind = bind, ${o.relax ? "relax = relax, " : ""}T = ${T}, horizon = ${scenario.ahead || 100}});`,
+      `r.binding'                          % the periods in which it binds`,
+      `r.path.${c(model.endo[0].name)}'    % ${model.endo[0].name} with the constraint; r.linear has the path that ignores it`,
+      ``);
   }
   if (result.determinate) {
     if (correlated) lines.push(`% The shocks are correlated here. The workbench orthogonalises them (Cholesky, in the order`, `% declared); dsge.irf and dsge.moments below treat them as independent.`);

@@ -163,7 +163,9 @@ plot(1:3)
 estimation(datafile = d, mh_replic = 2000);
 stoch_simul(order = 2, irf = 12, hp_filter = 1600) x;`);
   assert.equal(r.model.hints.irf, 12);
-  assert.ok(r.warnings.some(w => /first order/.test(w.message)));
+  assert.equal(r.model.hints.order, 2, "a file that asks for order 2 opens at second order");
+  assert.ok(!r.warnings.some(w => /order/.test(w.message)));
+  assert.ok(good(`${AR1}\nstoch_simul(order = 3);`).warnings.some(w => /goes to second order/.test(w.message)));
   assert.ok(r.warnings.some(w => /hp_filter is not applied/.test(w.message)));
   assert.ok(r.notes.some(n => /estimated_params block is not used/.test(n.message)));
   assert.ok(r.notes.some(n => /options_/.test(n.message)));
@@ -305,6 +307,111 @@ test("second order where there is nothing to add, and where there is no mean", a
   assert.ok(Number.isNaN(r.second.mean[0]), "the price level has no mean");
   assert.equal(r.second.mean[1], 0);
   assert.ok(Math.abs(r.second.mean[2] - 0.5 * 0.01 / (1 - 0.25)) < 1e-14, "E[exp(pi) - 1] is half the variance of pi");
+});
+
+// The three-equation model with a floor on the policy rate, in Dynare's OccBin notation.
+const ZLB = (constraint = "name 'zlb'; bind inot < -1; relax inot > -1;", extra = "") => `var x pi i inot rn; varexo en;
+parameters beta kappa phi; beta = 0.99; kappa = 0.1275; phi = 1.5;
+model(linear);
+pi = beta * pi(+1) + kappa * x;
+x = x(+1) - (i - pi(+1) - rn);
+inot = phi * pi + 0.125 * x;
+[name='rate', relax='zlb'] i = inot;
+[name='rate', bind='zlb'] i = -1;
+rn = 0.8 * rn(-1) + en;
+end;
+occbin_constraints; ${constraint} end;
+shocks; var en; stderr 1; end;
+${extra}`;
+
+test("occasionally binding constraints: Dynare's tags, block and surprise shocks are read", () => {
+  const r = good(ZLB(undefined, `shocks(surprise); var en; periods 1:2, 4 6; values -3, (2 * kappa), 0.5; end;
+occbin_setup; occbin_solver(simul_periods = 30, simul_check_ahead_periods = 80);`));
+  const m = r.model, o = m.occbin;
+  assert.deepEqual(m.constraints, ["zlb"]);
+  assert.equal(o.name, "zlb");
+  // the page's model is the regime in which the constraint is slack; the other differs in the tagged equation
+  const texts = eqs => eqs.map(q => q.text.replace(/\s+/g, " "));
+  assert.equal(m.equations.length, 5);
+  assert.ok(texts(m.equations).includes("i = inot") && !texts(m.equations).includes("i = -1"));
+  assert.ok(texts(o.equations).includes("i = -1") && !texts(o.equations).includes("i = inot"));
+  assert.equal(texts(o.equations).filter(t => texts(m.equations).includes(t)).length, 4);
+  assert.equal(printAst(o.bind, n => n.name), "inot < -1");
+  assert.equal(printAst(o.relax, n => n.name), "inot > -1");
+  // one value for each group of periods; commas are optional; a value may be an expression in parentheses
+  assert.deepEqual(o.shocks.map(row => row[0]), [-3, -3, 0, 0.255, 0, 0.5]);
+  assert.deepEqual([m.hints.occbinT, m.hints.occbinAhead], [30, 80]);
+  assert.ok(!r.notes.some(n => /occbin_constraints/.test(n.message)), "the block is used, not passed over");
+  // relax is optional, and so are the shocks
+  const bare = good(ZLB("name 'zlb'; bind inot < -1;")).model.occbin;
+  assert.ok(bare.relax === null && bare.shocks === null);
+  // overwrite starts the surprise shocks afresh
+  const twice = good(ZLB(undefined, `shocks(surprise); var en; periods 1; values -3; end;
+shocks(surprise, overwrite); var en; periods 2; values 1; end;`)).model.occbin;
+  assert.deepEqual(twice.shocks.map(row => row[0]), [0, 1]);
+  // a deterministic path in an ordinary shocks block is still not a surprise
+  assert.ok(good(ZLB(undefined, "shocks; var en; periods 1; values 2; end;")).warnings.some(w => /deterministic path/.test(w.message)));
+});
+
+test("occasionally binding constraints: what the reader refuses, and what it sets aside", () => {
+  assert.match(bad(ZLB("name 'elb'; bind inot < -1;"))[0].message, /tagged for the constraint 'zlb', which no occbin_constraints block defines/);
+  assert.match(bad(ZLB("name 'zlb'; relax inot > -1;"))[0].message, /needs a bind condition/);
+  assert.match(bad(ZLB("name 'zlb'; bind inot(-1) < -1;"))[0].message, /only use this period's variables, not inot with a lead or lag/);
+  assert.match(bad(ZLB("name 'zlb'; bind en < -1;"))[0].message, /may not use the shock 'en'/);
+  assert.match(bad(ZLB("name 'zlb'; bind inot + 1;"))[0].message, /must be an inequality/);
+  assert.match(bad(ZLB(undefined, "shocks(surprise); var en; periods 1:3, 5; values 1; end;"))[0].message, /2 groups of periods but 1 value/);
+  // a binding equation with no counterpart leaves the regimes with different numbers of equations
+  assert.match(bad(ZLB().replace("[name='rate', relax='zlb'] i = inot;", "i = inot;"))[0].message, /no equation is tagged for both regimes/);
+  assert.match(bad(ZLB().replace("[name='rate', bind='zlb'] i = -1;", "[name='rate', bind='zlb'] i = -1;\n[bind='zlb'] x = 0;"))[0].message, /6 equations, and 5 with it slack/);
+  // two constraints: the baseline regime is still a model, and the page says what it left out
+  const two = good(ZLB("name 'zlb'; bind inot < -1; name 'cap'; bind x > 5;").replace("x = x(+1)", "[relax='cap'] x = x(+1)").replace("rn = 0.8", "[bind='cap'] x = 5;\nrn = 0.8"));
+  assert.ok(two.model.occbin === null && two.model.equations.length === 5);
+  assert.deepEqual(two.model.constraints, ["zlb", "cap"]);
+  assert.ok(two.warnings.some(w => /2 occasionally binding constraints \(zlb, cap\)/.test(w.message)));
+  // a model without a constraint has none, and surprise shocks with nothing to surprise are reported
+  const plain = good(`${AR1}\nshocks(surprise); var e; periods 1; values 1; end;`);
+  assert.ok(plain.model.occbin === null && plain.model.constraints.length === 0);
+  assert.ok(plain.warnings.some(w => /surprise shocks are for a model with an occasionally binding constraint/.test(w.message)));
+});
+
+test("occasionally binding constraints: the piecewise-linear path", async () => {
+  const wb = new Workbench(engine);
+  const model = good(ZLB()).model;
+  await wb.load(model);
+  const r = await wb.solve({});
+  assert.ok(r.ok && r.determinate);
+  const col = (rows, name) => rows.map(row => row[r.names.indexOf(name)]);
+  // a large fall in the natural rate: the rate sits at the floor, and the recession is deeper than the linear one
+  const big = await wb.occbin([[-3]], { T: 20 });
+  assert.equal(big.path.length, 20);
+  const n = big.binding.filter(Boolean).length;
+  assert.ok(n >= 3 && big.binding.slice(0, n).every(Boolean) && !big.binding.slice(n).some(Boolean), "it binds from the first period for a spell, then never again");
+  assert.ok(col(big.path, "i").slice(0, n).every(v => v === -1), "the policy rate is at the floor while it binds");
+  assert.ok(Math.min(...col(big.linear, "i")) < -1, "the path that ignores the constraint goes through the floor");
+  assert.ok(col(big.path, "x")[0] < col(big.linear, "x")[0] - 1, "output falls further than the linear model says");
+  assert.ok(col(big.path, "inot").slice(n).every(v => v >= -1 - 1e-12), "once released, the rule never asks for less than the floor");
+  // the linear path is the first-order response
+  assert.ok(Math.abs(col(big.linear, "x")[0] - -3 * r.irf[0][0][0]) < 1e-12);
+  // a small shock never reaches the floor: the two paths are the same
+  const small = await wb.occbin([[-0.5]], { T: 12 });
+  assert.ok(!small.binding.some(Boolean));
+  assert.ok(small.path.flat().every((v, q) => Math.abs(v - small.linear.flat()[q]) < 1e-12));
+  // without an explicit relax condition the constraint is released when bind is false: here the same thing
+  const wb2 = new Workbench(engine);
+  await wb2.load(good(ZLB("name 'zlb'; bind inot < -1;")).model);
+  await wb2.solve({});
+  const again = await wb2.occbin([[-3]], { T: 20 });
+  assert.deepEqual(again.binding, big.binding);
+  assert.ok(again.path.flat().every((v, q) => Math.abs(v - big.path.flat()[q]) < 1e-12));
+  // a parameter moved on the page moves the path: a rule that reacts more to inflation leaves the floor sooner
+  await wb.solve({ phi: 3 });
+  const hawk = await wb.occbin([[-3]], { T: 20 });
+  assert.ok(hawk.binding.filter(Boolean).length < n);
+  // a model with no constraint has nothing to simulate here
+  const none = new Workbench(engine);
+  await none.load(good(AR1).model);
+  await none.solve({});
+  await assert.rejects(() => none.occbin([[1]]), /declares no occasionally binding constraint/);
 });
 
 test("the Taylor principle: the verdict is a result, not an error", async () => {

@@ -77,7 +77,8 @@ export function hideTip() { if (tip) tip.hidden = true; }
 /* ---- line chart -------------------------------------------------------- */
 /* series: [{name, values, color, dashed}], one value per period starting at
  * `x0`. Options: width, height, zero (draw the zero line), xLabel, group (a
- * shared object: charts in the same group move their crosshairs together). */
+ * shared object: charts in the same group move their crosshairs together),
+ * bands (runs of periods to shade, [[first, last], ...] as positions from 0). */
 export function lineChart(series, opt = {}) {
   const W = opt.width || 240, H = opt.height || 140, x0 = opt.x0 || 0;
   const m = { l: 44, r: 10, t: 8, b: opt.xLabel ? 30 : 20 };
@@ -93,6 +94,10 @@ export function lineChart(series, opt = {}) {
   const py = v => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
 
   const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img", "aria-label": opt.label || "line chart" });
+  for (const [a, b] of opt.bands || []) {             /* half a period either side, kept inside the plot */
+    const x1 = Math.max(m.l, px(a - 0.5)), x2 = Math.min(W - m.r, px(b + 0.5));
+    svg("rect", { x: x1.toFixed(1), y: m.t, width: Math.max(0, x2 - x1).toFixed(1), height: H - m.t - m.b, class: "bind" }, root);
+  }
   const yt = ticks(lo, hi, 3), step = yt.length > 1 ? yt[1] - yt[0] : 1;
   for (const v of yt) {
     svg("line", { x1: m.l, x2: W - m.r, y1: py(v), y2: py(v), class: v === 0 ? "axis" : "grid" }, root);
@@ -230,7 +235,7 @@ export function heatmap(names, matrix, opt = {}) {
 /* A legend: a line or a box per series, named. */
 export function legend(items, kind = "line") {
   return h("div", { class: "legend" }, items.map(it => {
-    const key = h("span", { class: `key ${kind}${it.dashed ? " dashed" : ""}` });
+    const key = h("span", { class: `key ${it.kind || kind}${it.dashed ? " dashed" : ""}${it.faint ? " faint" : ""}` });
     key.style.setProperty("--c", it.color);
     return h("span", { class: "legend-item" }, key, h("span", { text: it.name }));
   }));

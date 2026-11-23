@@ -10,9 +10,13 @@ the eigenvalues, the impulse responses, and the theoretical moments and
 variance decomposition. A second run, stoch_simul(order=2), writes
 test/reference/NAME.order2.json: the second-order terms of the decision
 rule (ghxx, ghxu, ghuu, ghs2), the means to second order, and a pruned
-simulation for a fixed path of shocks. The tests compare the workbench's
-numbers with these files; they are committed, so the tests need neither
-Dynare nor Octave.
+simulation for a fixed path of shocks. For a model with an occasionally
+binding constraint ("occbin" in index.json) a third run executes the file
+as it is, with its own shocks(surprise) and occbin_solver, and writes
+test/reference/NAME.occbin.json: Dynare's piecewise-linear path, the path
+that ignores the constraint, and the periods in which it binds. The tests
+compare the workbench's numbers with these files; they are committed, so
+the tests need neither Dynare nor Octave.
 
 The model file is used as it is up to the first computing command (the
 "cut" pattern in index.json); from there on it is replaced by a single
@@ -209,6 +213,63 @@ def reference2(entry):
     print(f"{name}: order 2 -> test/reference/{name}.order2.json ({what}, {nx} states)")
 
 
+DUMP_OCCBIN = r"""
+function dump_occbin(outfile)
+  global M_ oo_
+  n = M_.orig_endo_nbr;
+  s = oo_.occbin.simul;
+  r = struct();
+  r.dynare = dynare_version();
+  r.endo = M_.endo_names(1:n)';
+  r.exo = M_.exo_names';
+  r.steady = s.ys(1:n)';
+  r.piecewise = s.piecewise(:, 1:n);                % in levels, one row per period
+  r.linear = s.linear(:, 1:n);
+  % regime_history(t) is the plan made in period t: the regimes expected from t on and
+  % when each starts. Period t is in the first of them; past the last period that has a
+  % plan (the last one with a shock) the economy follows that last plan.
+  T = size(s.piecewise, 1); H = numel(s.regime_history); r.binding = zeros(1, T);
+  for t = 1:T
+    h = s.regime_history(min(t, H));
+    q = find(h.regimestart <= t - min(t, H) + 1, 1, 'last');
+    r.binding(t) = double(h.regime(q) ~= 0);
+  end
+  r.error_flag = s.error_flag;
+  r.periods = size(s.piecewise, 1);
+  fid = fopen(outfile, 'w');
+  fputs(fid, jsonencode(r));
+  fclose(fid);
+end
+"""
+
+
+def reference_occbin(entry):
+    name = pathlib.Path(entry["file"]).stem
+    text = (EXAMPLES / entry["file"]).read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        (tmp / f"{name}.mod").write_text(text, encoding="utf-8")
+        (tmp / "dump_occbin.m").write_text(DUMP_OCCBIN)
+        out = tmp / "out.json"
+        cmd = f"dynare {name} nolog nograph; dump_occbin('{out}');"
+        run = subprocess.run(["octave", "--no-gui", "--quiet", "--eval", cmd], cwd=tmp, capture_output=True, text=True)
+        if run.returncode != 0 or not out.exists():
+            sys.stderr.write(run.stdout[-3000:] + run.stderr[-3000:])
+            raise SystemExit(f"{name}: Dynare's OccBin failed")
+        data = json.loads(out.read_text())
+    if not isinstance(data["exo"], list):
+        data["exo"] = [data["exo"]]
+    n, T = len(data["endo"]), data["periods"]
+    data["piecewise"] = regular(data["piecewise"], T, n, name)
+    data["linear"] = regular(data["linear"], T, n, name)
+    data["binding"] = [int(v) for v in regular(data["binding"], 1, T, name)[0]]
+    data["steady"] = regular(data["steady"], 1, n, name)[0]
+    data["model"] = entry["file"]
+    assert data["error_flag"] == 0, (name, "Dynare's OccBin reported an error")
+    (OUT / f"{name}.occbin.json").write_text(json.dumps(data, separators=(",", ":")) + "\n")
+    print(f"{name}: OccBin -> test/reference/{name}.occbin.json ({T} periods, binding in {sum(data['binding'])})")
+
+
 def reference(entry):
     name = pathlib.Path(entry["file"]).stem
     text = (EXAMPLES / entry["file"]).read_text(encoding="utf-8")
@@ -274,6 +335,8 @@ def main():
         if not want or pathlib.Path(entry["file"]).stem in want:
             reference(entry)
             reference2(entry)
+            if entry.get("occbin"):
+                reference_occbin(entry)
 
 
 if __name__ == "__main__":

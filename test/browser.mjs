@@ -181,6 +181,52 @@ await page.click('#status .order button:text-is("1st order")');
 await page.waitForTimeout(500); await settled();
 check(!/second order/.test(await status()), "... and back to first");
 
+// --- an occasionally binding constraint
+check(!(await page.$$eval("#tabs button", bs => bs.map(b => b.textContent))).includes("Constraint"), "a model without a constraint has no Constraint tab");
+await page.selectOption("#example", "zlb.mod");
+await page.waitForTimeout(700); await settled();
+check((await page.$$eval("#tabs button", bs => bs.map(b => b.textContent))).includes("Constraint") && /Unique stable solution/.test(await status()), "a model that declares one gets the tab, and is solved with the constraint slack");
+await tab("Summary");
+check(/Constraints/.test(await page.textContent("#view .tiles")), "the summary counts the constraint");
+await tab("Constraint");
+await page.waitForSelector("#view .multiples svg.chart", { timeout: 15000 }).catch(() => {});
+const constraintText = async () => (await page.textContent("#view")).replace(/\s+/g, " ");
+check(/Constraint 'zlb' binds when inot < 0 and is released when inot > 0/.test(await constraintText()), "the tab states the constraint's two conditions", (await constraintText()).slice(0, 90));
+check(/binds in 5 of 40 periods/.test(await constraintText()) && /Periods 1–5/.test(await constraintText()), "the file's surprise shocks are simulated: the periods in which it binds are named");
+check((await page.$$('.card[data-name="i"] svg.chart rect.bind')).length === 1 && (await page.$$('.card[data-name="i"] svg.chart path.line')).length === 2, "each chart shades the binding periods under the two paths");
+await shot("constraint");
+await page.click('#view .seg button:text-is("One shock")');
+await page.waitForTimeout(600);
+check(/binds in/.test(await constraintText()) && /innovation of −?-?3 standard deviations in en in period 1/.test(await constraintText()), "one shock of a chosen size can be simulated instead");
+await page.fill('#view input[aria-label="Shock size in standard deviations"]', "0.5");
+await page.keyboard.press("Tab");
+await page.waitForTimeout(600);
+check(/The constraint never binds/.test(await constraintText()) && (await page.$$("#view svg.chart rect.bind")).length === 0, "a shock the other way never reaches the floor, and the tab says so");
+await page.fill('#view input[aria-label="Shock size in standard deviations"]', "-4");
+await page.keyboard.press("Tab");
+await page.waitForTimeout(600);
+const boundAt = async () => Number(/binds in (\d+) of/.exec(await constraintText())[1]);
+const boundBefore = await boundAt();
+await setParam("phi_pi", 3);
+await page.waitForTimeout(500);
+check(await boundAt() < boundBefore, "moving a parameter re-runs the simulation: a rule that reacts more leaves the floor sooner", `${boundBefore} periods, then ${await boundAt()}`);
+await page.click('#view .bar button:text-is("Table")');
+await page.waitForTimeout(300);
+check(/Binds/.test(await page.textContent("#view table.grid thead")) && (await page.$$("#view table.grid tbody tr")).length === 40, "the numbers can be shown as a table");
+await grab(() => page.click('#view .bar button:text-is("CSV")'), "the two paths download as CSV", (b, n) => n === "zlb-constraint.csv" && /period,binding,x,x \(ignoring the constraint\)/.test(b));
+await page.click('#view .bar button:text-is("Table")');
+await tab("Cozy script");
+check(/dsge\.occbin\(m, alt,/.test(await page.textContent("#view pre.source")), "the Cozy script reproduces the simulation");
+await page.click("#reset");
+await page.waitForTimeout(500); await settled();
+await page.selectOption("#example", "irreversible.mod");
+await page.waitForTimeout(800); await settled();
+await tab("Constraint");
+await page.waitForSelector("#view .multiples svg.chart", { timeout: 15000 }).catch(() => {});
+check(/Constraint 'IRR' binds when log\(Invest\) - log\(steady_state\(Invest\)\) < log\(phi\)/.test(await constraintText()) && /binds in 45 of 60 periods/.test(await constraintText()),
+  "a nonlinear model with a multiplier is simulated too, its conditions shown as written", (await constraintText()).slice(0, 110));
+await tab("Summary");
+
 // --- a large model, and a file opened from disk
 await page.selectOption("#example", "Smets_Wouters_2007.mod");
 await page.waitForTimeout(800); await settled();
@@ -207,7 +253,7 @@ check(await page.evaluate(() => document.documentElement.dataset.theme) === "dar
 await page.click("#theme");
 await page.click("#about-open");
 await page.waitForSelector("#validation tbody tr");
-check((await page.$$("#validation tbody tr")).length === 8, "the about box lists the eight models checked against Dynare");
+check((await page.$$("#validation tbody tr")).length === 10, "the about box lists the ten models checked against Dynare");
 await shot("about");
 await page.click("#about form button");
 await page.setViewportSize({ width: 390, height: 800 });

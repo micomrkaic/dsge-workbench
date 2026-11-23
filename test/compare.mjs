@@ -144,3 +144,31 @@ export async function compareSecondOrder(engine, ex) {
   report.simulation = gap(sim, ref.sim, 1e-3 * largest(ref.sim));
   return { linear: false, states: nx, report };
 }
+
+// A model with an occasionally binding constraint against Dynare's OccBin
+// (test/reference/NAME.occbin.json): the file's own surprise shocks, the
+// horizons its occbin_solver command gives. Returns {periods, bound, report}:
+// the path with the constraint and the path that ignores it, as largest
+// relative differences. The periods in which the constraint binds must be
+// the same ones.
+export async function compareOccbin(engine, ex) {
+  const name = ex.file.replace(/\.mod$/, "");
+  const ref = JSON.parse(fs.readFileSync(new URL(`reference/${name}.occbin.json`, here), "utf8"));
+  const parsed = parseMod(fs.readFileSync(new URL(`../docs/examples/${ex.file}`, here), "utf8"));
+  assert.deepEqual(parsed.errors, []);
+  const model = parsed.model, wb = new Workbench(engine);
+  assert.ok(model.occbin && model.occbin.shocks, "the file declares a constraint and its surprise shocks");
+  await wb.load(model);
+  const r = await wb.solve({});
+  assert.ok(r.ok && r.determinate, r.error);
+  const o = await wb.occbin(model.occbin.shocks, { T: model.hints.occbinT, ahead: model.hints.occbinAhead });
+  const n = ref.endo.length;
+  assert.equal(o.path.length, ref.periods, "as many periods as Dynare simulated");
+  assert.deepEqual(o.binding.map(b => (b ? 1 : 0)), ref.binding, "the constraint binds in the same periods");
+  const cut = M => M.map(row => row.slice(0, n));
+  const report = {
+    path: gap(cut(o.path), ref.piecewise, 1e-3 * largest(ref.piecewise)),
+    linear: gap(cut(o.linear), ref.linear, 1e-3 * largest(ref.linear)),
+  };
+  return { periods: ref.periods, bound: ref.binding.reduce((a, b) => a + b, 0), report };
+}

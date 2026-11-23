@@ -34,7 +34,7 @@ const SKIPPED_BLOCKS = new Set(["estimated_params", "estimated_params_init", "es
   "estimated_params_remove", "observation_trends", "optim_weights", "homotopy_setup", "irf_calibration",
   "moment_calibration", "shock_groups", "epilogue", "deterministic_trends", "osr_params_bounds",
   "heteroskedastic_shocks", "filter_initial_state", "generate_irfs", "matched_moments", "verbatim",
-  "histval", "endval", "mshocks", "svar_identification", "pac_target_info", "occbin_constraints"]);
+  "histval", "endval", "mshocks", "svar_identification", "pac_target_info"]);
 
 /* Commands that end with ";" and are read past. */
 const SKIPPED_COMMANDS = new Set(["steady", "check", "resid", "stoch_simul", "estimation", "varobs", "varexobs",
@@ -385,7 +385,7 @@ export function printAst(e, name) {
   const go = (n, parent, right) => {
     switch (n.t) {
       case "num": return n.v < 0 ? `(${numText(n)})` : numText(n);
-      case "neg": { const s = "-" + go(n.a, 6, false); return parent > 0 ? `(${s})` : s; }
+      case "neg": { const s = "-" + go(n.a, 6, false); return parent > 1 ? `(${s})` : s; }      /* bare beside a comparison: x < -1 */
       case "call": return `${n.fn}(${n.args.map(a => go(a, 0, false)).join(", ")})`;
       case "bin": {
         const p = prec[n.op];
@@ -426,7 +426,9 @@ export function parseMod(source) {
   const predetermined = new Set();
   let linear = false, sawModel = false;
   let initval = null, steadyBlock = null, shockStmts = [];
-  const hints = { irf: 40, order: 1 };
+  const constraints = [];                           /* occbin_constraints: {name, bind, relax, line} */
+  let surprise = [];                                /* shocks(surprise): {shock, periods: [[from, to]], values: [expr], line} */
+  const hints = { irf: 40, order: 1, occbinT: 0, occbinAhead: 0 };
   const symbols = name => { const k = kinds.get(name); return k === "scalar" ? undefined : k; };    /* inside the model */
   const symValue = name => { const k = kinds.get(name); return k === "scalar" ? "par" : k; };      /* in values: helper scalars count */
 
@@ -489,13 +491,17 @@ export function parseMod(source) {
       cur.i++;
     }
     expectSemi("'model'");
-    let tag = "";
+    let tag = "", bindTag = [], relaxTag = [];
+    const regimes = text => text.split(",").map(x => x.trim()).filter(Boolean);
     while (peek() && !(isId("end") && isOp(";", 1))) {
       const t = peek();
-      if (isOp("[")) {                                /* [name = '...', ...] */
+      if (isOp("[")) {                                /* [name = '...', bind = '...', relax = '...', ...] */
         cur.i++;
         while (peek() && !isOp("]")) {
-          if (isId("name") && isOp("=", 1) && peek(2) && peek(2).k === "str") { tag = peek(2).v; cur.i += 3; }
+          const str = isOp("=", 1) && peek(2) && peek(2).k === "str";
+          if (isId("name") && str) { tag = peek(2).v; cur.i += 3; }
+          else if (isId("bind") && str) { bindTag = regimes(peek(2).v); cur.i += 3; }
+          else if (isId("relax") && str) { relaxTag = regimes(peek(2).v); cur.i += 3; }
           else cur.i++;
         }
         cur.i++;
@@ -519,8 +525,8 @@ export function parseMod(source) {
       if (isOp("=")) { cur.i++; rhs = parseExpr(cur, symbols); }
       const to = cur.i;
       expectSemi("an equation");
-      equations.push({ lhs, rhs, line: t.line, name: tag, text: sourceText(from, to) });
-      tag = "";
+      equations.push({ lhs, rhs, line: t.line, name: tag, text: sourceText(from, to), bind: bindTag, relax: relaxTag });
+      tag = ""; bindTag = []; relaxTag = [];
     }
     if (!peek()) throw new ModError("the model block is never closed by 'end;'", line);
     cur.i += 2;
@@ -542,8 +548,53 @@ export function parseMod(source) {
     cur.i += 2;
   }
 
+  /* var e; periods 1:9, 10, 50; values -0.01, (0.5 * s), 0.02; — one value for each group of periods */
+  function surprisePath(shock, line) {
+    const periods = [], values = [];
+    cur.i++;                                          /* periods */
+    while (peek() && !isOp(";")) {
+      if (isOp(",")) { cur.i++; continue; }
+      const a = peek();
+      if (a.k !== "num" || !/^\d+$/.test(a.v) || Number(a.v) < 1) throw new ModError("periods are whole numbers from 1, or ranges such as 1:9", a.line);
+      cur.i++;
+      let to = Number(a.v);
+      if (isOp(":")) {
+        cur.i++;
+        const b = peek();
+        if (!b || b.k !== "num" || !/^\d+$/.test(b.v) || Number(b.v) < Number(a.v)) throw new ModError("a range of periods is written first:last", a.line);
+        cur.i++;
+        to = Number(b.v);
+      }
+      periods.push([Number(a.v), to]);
+    }
+    expectSemi("'periods'");
+    if (!isId("values")) throw new ModError(`after the periods of '${shock}' comes 'values ...;'`, line);
+    cur.i++;
+    while (peek() && !isOp(";")) {
+      if (isOp(",")) { cur.i++; continue; }
+      if (isOp("(")) { values.push(parseExpr(cur, symValue)); continue; }
+      let sign = 1;
+      if (isOp("-")) { sign = -1; cur.i++; } else if (isOp("+")) cur.i++;
+      const v = peek();
+      if (!v || v.k !== "num") throw new ModError("a value is a number, or an expression in parentheses", (v || peek(-1)).line);
+      cur.i++;
+      values.push({ t: "num", v: sign * Number(v.v), text: (sign < 0 ? "-" : "") + v.v });
+    }
+    expectSemi("'values'");
+    if (values.length !== periods.length) throw new ModError(`'${shock}' has ${periods.length} group${periods.length === 1 ? "" : "s"} of periods but ${values.length} value${values.length === 1 ? "" : "s"}; each group takes one value`, line);
+    surprise.push({ shock, periods, values, line });
+  }
+
   function shocksBlock(line) {
-    if (isOp("(")) { while (peek() && !isOp(")")) cur.i++; cur.i++; }
+    let isSurprise = false;
+    if (isOp("(")) {
+      while (peek() && !isOp(")")) {
+        if (isId("surprise")) isSurprise = true;
+        if (isId("overwrite")) surprise = [];
+        cur.i++;
+      }
+      cur.i++;
+    }
     expectSemi("'shocks'");
     const known = name => { if (kinds.get(name) !== "exo") throw new ModError(`'${name}' is not a declared shock (varexo)`, (peek() || toks[cur.i - 1]).line); return name; };
     while (peek() && !(isId("end") && isOp(";", 1))) {
@@ -568,6 +619,8 @@ export function parseMod(source) {
             cur.i++;
             shockStmts.push({ kind: "sd", a, expr: parseExpr(cur, symValue), line: t.line });
             expectSemi("a standard deviation");
+          } else if (isId("periods") && isSurprise) {
+            surprisePath(a, t.line);
           } else if (isId("periods")) {
             skipToSemi();
             if (isId("values")) skipToSemi();
@@ -587,6 +640,30 @@ export function parseMod(source) {
       } else throw new ModError(`unexpected '${t.v}' in the shocks block`, t.line);
     }
     if (!peek()) throw new ModError("the shocks block is never closed by 'end;'", line);
+    cur.i += 2;
+  }
+
+  /* name 'ZLB'; bind i_notional < 0; relax i_notional > 0;   one or more, until end; */
+  function occbinBlock(line) {
+    expectSemi("'occbin_constraints'");
+    while (peek() && !(isId("end") && isOp(";", 1))) {
+      const t = peek();
+      if (!isId("name") || !peek(1) || peek(1).k !== "str") throw new ModError("a constraint is written: name 'NAME'; bind CONDITION; relax CONDITION;", t.line);
+      const c = { name: peek(1).v, bind: null, relax: null, line: t.line };
+      cur.i += 2;
+      expectSemi("the constraint's name");
+      while (isId("bind") || isId("relax") || isId("error_bind") || isId("error_relax")) {
+        const key = peek().v;
+        cur.i++;
+        const expr = parseExpr(cur, symbols);
+        expectSemi(`the ${key} condition`);
+        if (key === "bind" || key === "relax") c[key] = expr;        /* error_bind and error_relax tune Dynare's own solver */
+      }
+      if (!c.bind) throw new ModError(`the constraint '${c.name}' needs a bind condition: when, with the constraint slack, it is violated`, t.line);
+      if (constraints.some(o => o.name === c.name)) throw new ModError(`the constraint '${c.name}' is defined twice`, t.line);
+      constraints.push(c);
+    }
+    if (!peek()) throw new ModError("the occbin_constraints block is never closed by 'end;'", line);
     cur.i += 2;
   }
 
@@ -622,6 +699,7 @@ export function parseMod(source) {
         valueBlock("steady_state_model", t.line, steadyBlock, () => true);
       }
       else if (word === "shocks" && (isOp(";", 1) || isOp("(", 1))) { cur.i++; shocksBlock(t.line); }
+      else if (word === "occbin_constraints" && isOp(";", 1)) { cur.i++; occbinBlock(t.line); }
       else if (Object.hasOwn(UNSUPPORTED, word)) throw new ModError(UNSUPPORTED[word], t.line);
       else if (SKIPPED_BLOCKS.has(word) && (isOp(";", 1) || isOp("(", 1))) {
         cur.i++;
@@ -634,11 +712,20 @@ export function parseMod(source) {
             const o = toks[j], eq = toks[j + 1], val = toks[j + 2];
             if (o.k !== "id" || !eq || eq.v !== "=" || !val) continue;
             if (o.v === "irf" && val.k === "num" && Number(val.v) > 0) hints.irf = Math.min(400, Number(val.v));
-            if (o.v === "order" && val.k === "num" && Number(val.v) > 1) warnings.push({ line: o.line, message: `stoch_simul asks for order ${val.v}; the workbench solves to first order` });
+            if (o.v === "order" && val.k === "num" && Number(val.v) > 1) hints.order = 2;
+            if (o.v === "order" && val.k === "num" && Number(val.v) > 2) warnings.push({ line: o.line, message: `stoch_simul asks for order ${val.v}; the workbench goes to second order` });
             if (o.v === "hp_filter" || o.v === "bandpass_filter" || o.v === "one_sided_hp_filter") warnings.push({ line: o.line, message: `${o.v} is not applied: moments are those of the unfiltered model` });
           }
           for (let j = cur.i; toks[j] && !(toks[j].k === "op" && toks[j].v === ";"); j++)
             if (toks[j].k === "id" && toks[j].v === "loglinear") warnings.push({ line: toks[j].line, message: "loglinear is not applied: results are for the model as written" });
+        }
+        if (word === "occbin_solver") {
+          for (let j = cur.i; toks[j] && !(toks[j].k === "op" && toks[j].v === ";"); j++) {
+            const o = toks[j], eq = toks[j + 1], val = toks[j + 2];
+            if (o.k !== "id" || !eq || eq.v !== "=" || !val || val.k !== "num") continue;
+            if (o.v === "simul_periods") hints.occbinT = Math.max(1, Math.min(2000, Math.round(Number(val.v))));
+            if (o.v === "simul_check_ahead_periods") hints.occbinAhead = Math.max(1, Math.min(2000, Math.round(Number(val.v))));
+          }
         }
         skipToSemi();
         if (!["steady", "check", "resid"].includes(word)) notes.push({ line: t.line, message: `${word} is a Dynare command; the workbench computes its results from the model alone` });
@@ -823,8 +910,56 @@ export function parseMod(source) {
     for (const a of leadAux) a.def = longLags(a.def);  /* a term moved back a period may now hold a longer lag */
   } catch (e) { if (!(e instanceof ModError)) throw e; fail(e.message, e.line); return result; }
   aux.push(...leadAux);                             /* after the variables their definitions may use */
+  /* Occasionally binding constraints. The baseline regime, the one the
+   * steady state belongs to and everything else on the page is computed for,
+   * has the equations that carry no bind tag; with one constraint, the other
+   * regime has those that carry no relax tag. Both went through the
+   * rewriting above together, so they share their auxiliary variables. */
+  const declared = new Set(constraints.map(c => c.name));
+  for (const q of eqs) for (const nm of [...q.bind, ...q.relax]) if (!declared.has(nm)) fail(`the equation is tagged for the constraint '${nm}', which no occbin_constraints block defines`, q.line);
+  if (errors.length) return result;
+  let occbin = null;
+  const allEqs = eqs;
+  eqs = allEqs.filter(q => !q.bind.length);
+  if (constraints.length > 1) {
+    warnings.push({ line: constraints[1].line, message: `the model has ${constraints.length} occasionally binding constraints (${constraints.map(c => c.name).join(", ")}); the workbench simulates one, so it shows this model with none of them binding` });
+  } else if (constraints.length === 1) {
+    const c = constraints[0], bound = allEqs.filter(q => !q.relax.length);
+    if (!allEqs.some(q => q.bind.length) || !allEqs.some(q => q.relax.length))
+      fail(`no equation is tagged for both regimes of the constraint '${c.name}': tag the equation that holds while it is slack [relax='${c.name}'] and the one that replaces it while it binds [bind='${c.name}']`, c.line);
+    else if (bound.length !== eqs.length)
+      fail(`with the constraint '${c.name}' binding the model has ${bound.length} equation${bound.length === 1 ? "" : "s"}, and ${eqs.length} with it slack; each tagged equation needs its counterpart`, c.line);
+    /* the conditions: this period's variables in levels, parameters, steady states */
+    const condition = (e, which) => {
+      if (!e) return null;
+      let out = mapAst(e, n => n.t === "loc" && inlined.has(n.name) ? inlined.get(n.name) : null);
+      out = mapAst(out, n => {
+        if (n.t === "loc") return { t: "par", name: n.name, line: n.line };
+        if (n.t === "ss") { if (!ssParams.has(n.name)) ssParams.set(n.name, fresh(`${n.name}_SS`)); return { t: "par", name: ssParams.get(n.name), line: n.line }; }
+        return null;
+      });
+      if (!(out.t === "bin" && ["<", ">", "<=", ">="].includes(out.op))) fail(`the ${which} condition of '${c.name}' must be an inequality, such as  i < 0`, c.line);
+      walkAst(out, n => {
+        if (n.t === "exo") fail(`the ${which} condition of '${c.name}' may not use the shock '${n.name}'; conditions are on this period's variables`, c.line);
+        if (n.t === "var" && (n.shift !== 0 || predetermined.has(n.name))) fail(`the ${which} condition of '${c.name}' may only use this period's variables, not ${n.name} with a lead or lag; define a variable for it in the model`, c.line);
+        if (n.t === "par") usedPar.add(n.name);
+      });
+      return out;
+    };
+    const bind = condition(c.bind, "bind"), relax = condition(c.relax, "relax");
+    if (errors.length) return result;
+    occbin = { name: c.name, line: c.line, bind, relax, bound };
+  }
+  if (surprise.length && !occbin) warnings.push({ line: surprise[0].line, message: "the surprise shocks are for a model with an occasionally binding constraint; this one has none the workbench can simulate, so they are not used" });
   const nOriginal = eqs.length;
-  for (const a of aux) eqs.push({ expr: { t: "bin", op: "-", a: { t: "var", name: a.name, shift: 0 }, b: a.def }, text: "", name: "", line: 0, aux: true });
+  const auxEqs = aux.map(a => ({ expr: { t: "bin", op: "-", a: { t: "var", name: a.name, shift: 0 }, b: a.def }, text: "", name: "", line: 0, aux: true, bind: [], relax: [] }));
+  eqs.push(...auxEqs);
+  if (occbin) occbin.bound.push(...auxEqs);
+  for (const q of (occbin ? occbin.bound : [])) walkAst(q.expr, n => {
+    if (n.t === "par") usedPar.add(n.name);
+    if (n.t === "var") usedEndo.add(n.name);
+    if (n.t === "exo") usedExo.add(n.name);
+  });
   for (const q of eqs) walkAst(q.expr, n => {
     if (n.t === "par") usedPar.add(n.name);
     if (n.t === "var") usedEndo.add(n.name);
@@ -863,6 +998,23 @@ export function parseMod(source) {
   } catch (e) { if (!(e instanceof ModError)) throw e; fail(e.message, e.line); return result; }
   for (const s of exo) if (!given.has(s.name)) warnings.push({ line: s.line, message: `the shock '${s.name}' has no standard deviation in a shocks block, so it is zero (as in Dynare)` });
 
+  /* The surprise shocks of an OccBin run: a value for each shock in each period that has one. */
+  let surpriseRows = null;
+  if (occbin && surprise.length) {
+    try {
+      const T = Math.max(...surprise.flatMap(g => g.periods.map(([, to]) => to)));
+      surpriseRows = Array.from({ length: Math.min(T, 2000) }, () => new Array(k).fill(0));
+      for (const g of surprise) {
+        g.values.forEach((expr, q) => {
+          walkAst(expr, n => { if (n.t === "var" || n.t === "exo" || n.t === "ss") throw new ModError("a shock's value may not depend on a variable", g.line); });
+          const v = evalAst(expr, lookup(g.line));
+          if (!Number.isFinite(v)) throw new ModError(`a value of the shock '${g.shock}' is not a number (vectors computed in MATLAB are not read)`, g.line);
+          for (let t = g.periods[q][0]; t <= Math.min(g.periods[q][1], 2000); t++) surpriseRows[t - 1][idx(g.shock)] = v;
+        });
+      }
+    } catch (e) { if (!(e instanceof ModError)) throw e; fail(e.message, e.line); return result; }
+  }
+
   /* Starting values and the steady state. */
   const endoNames = new Set(endo.map(v => v.name));
   const init = (initval || []).filter(a => endoNames.has(a.name));
@@ -896,6 +1048,12 @@ export function parseMod(source) {
     exo,
     params: defs.map(d => ({ ...d, longName: (params.find(p => p.name === d.name) || {}).longName || "" })),
     equations: eqs.map(q => ({ expr: q.expr, text: q.text, name: q.name, line: q.line, aux: !!q.aux })),
+    /* one occasionally binding constraint: its name, the two conditions, the equations of the regime
+     * in which it binds (as `equations` are those of the regime in which it is slack), and the surprise
+     * shocks the file gives for it, one row per period and one column per shock (or null) */
+    occbin: occbin && { name: occbin.name, bind: occbin.bind, relax: occbin.relax,
+      equations: occbin.bound.map(q => ({ expr: q.expr, text: q.text, name: q.name, line: q.line, aux: !!q.aux })), shocks: surpriseRows },
+    constraints: constraints.map(c => c.name),
     init, steady, ssParams: [...ssParams].map(([of, name]) => ({ of, name })),
     shocks: { sd, corr },
     hints, cozy,

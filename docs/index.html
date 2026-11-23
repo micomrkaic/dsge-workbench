@@ -68,14 +68,16 @@
   to a server.</p>
   <p>Each example model was also solved by Dynare 6.0. The workbench's steady state, decision rule, eigenvalues, impulse
   responses, standard deviations, correlations, autocorrelations and variance decomposition agree with Dynare's to
-  better than one part in a billion on seven of the eight, and to one part in a million on the badly conditioned
+  better than one part in a billion on nine of the ten, and to one part in a million on the badly conditioned
   Fernandez-Villaverde model, where the workbench's solution is the one that satisfies the model's equations more
   closely. To second order the terms of the decision rule, the means and a pruned simulation are compared with Dynare's
   <code>stoch_simul(order=2)</code>; a model declared linear has no such terms. The numbers below are the largest
-  difference, relative to the size of the quantity. The comparison runs on every change to the code.</p>
+  difference, relative to the size of the quantity. The two models with an occasionally binding constraint are also
+  simulated by Dynare's OccBin for the surprise shocks in their files: the constraint must bind in the same periods,
+  and the paths are compared. The comparison runs on every change to the code.</p>
   <table class="grid" id="validation"></table>
-  <p><strong>Limits.</strong> No third order; no estimation, no occasionally binding constraints, no optimal
-  policy. Variances are those of the first-order solution, and of the unfiltered model. Statements the workbench does not use are listed under the editor
+  <p><strong>Limits.</strong> No third order; no estimation, no optimal policy; one occasionally binding
+  constraint, not two. Variances are those of the first-order solution, and of the unfiltered model. Statements the workbench does not use are listed under the editor
   instead of being silently dropped.</p>
   <form method="dialog"><button>Close</button></form>
 </dialog>

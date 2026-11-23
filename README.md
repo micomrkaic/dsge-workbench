@@ -6,17 +6,20 @@ Solve and explore DSGE models in a browser tab. Paste a model written in
 [Dynare](https://www.dynare.org)'s notation and get its steady state, the
 Blanchard–Kahn check, impulse responses, theoretical moments and a variance
 decomposition, recomputed as you drag a parameter, to first order or to
-second. Nothing to install, and nothing leaves your machine.
+second, and with an occasionally binding constraint (a zero lower bound,
+say) if the model has one. Nothing to install, and nothing leaves your
+machine.
 
 **[Open the workbench](https://micomrkaic.github.io/dsge-workbench/)**
 
 ![Impulse responses of an RBC model, with a pinned baseline](docs/img/responses.png)
 
-Its numbers are checked against Dynare 6.0 on eight models, from the
-stochastic growth model to Smets and Wouters (2007). On seven they agree to
-better than one part in a billion; on the eighth to one part in a million,
+Its numbers are checked against Dynare 6.0 on ten models, from the
+stochastic growth model to Smets and Wouters (2007). On nine they agree to
+better than one part in a billion; on the tenth to one part in a million,
 and there the workbench is the more accurate of the two. The second-order
-solutions agree with Dynare's `order=2` to nine digits or better
+solutions agree with Dynare's `order=2` to nine digits or better, and the
+paths with a binding constraint agree with Dynare's OccBin to thirteen
 ([Validation](#validation)).
 
 ## What it does
@@ -25,7 +28,8 @@ solutions agree with Dynare's `order=2` to nine digits or better
   with equation tags and model-local variables, leads and lags of any
   length (removed the way Dynare removes them, so that a term such as
   `1 / c(+2)` keeps its curvature), `steady_state()`, `initval`,
-  `steady_state_model`, the `shocks`
+  `steady_state_model`, Dynare's OccBin notation (`bind` and `relax`
+  equation tags, `occbin_constraints`, `shocks(surprise)`), the `shocks`
   block with variances, covariances and correlations,
   `predetermined_variables`, and the `@#define` / `@#if` macro directives.
   Dynare's own example files load unmodified. An `initval` block written
@@ -51,6 +55,14 @@ solutions agree with Dynare's `order=2` to nine digits or better
   difference. The decision-rule tab lists the coefficient on every product
   of two states or shocks. Correlated shocks are handled; a model declared
   `linear` has no second-order terms and stays at first order.
+- **Simulates an occasionally binding constraint.** A model that declares
+  one the way Dynare's OccBin does gets a Constraint tab: the path for the
+  file's surprise shocks, or for one shock of a size you choose, by the
+  piecewise-linear method of Guerrieri and Iacoviello (2015). Each variable
+  is drawn with the constraint and ignoring it, the periods in which it
+  binds are shaded and named, and the simulation is run again as you move a
+  parameter (a central bank that reacts more to inflation leaves the zero
+  lower bound sooner).
 - **Treats indeterminacy as a result.** A model with too few or too many
   unstable roots gets a verdict and an eigenvalue chart, not an error
   message.
@@ -68,6 +80,8 @@ solutions agree with Dynare's `order=2` to nine digits or better
   moved parameters, and a script that reproduces the solution in Cozy.
 
 ![Second order: a five-standard-deviation shock against its first-order response](docs/img/second-order.png)
+
+![The zero lower bound: the policy rate held at zero, and what that does to output and inflation](docs/img/constraint.png)
 
 ![The Taylor principle failing](docs/img/indeterminate.png)
 
@@ -109,6 +123,8 @@ workbench, in the same WebAssembly the browser loads, and compare:
 | Schorfheide (2000) (Dynare `fs2000.mod`), leads of two periods | 14 | 2 | 2.0e-10 |
 | Galí (2015), baseline New Keynesian, with a unit root | 14 | 3 | 8.0e-10 |
 | Fernández-Villaverde (2010), baseline New Keynesian (Dynare `NK_baseline.mod`) | 28 | 5 | 9.5e-7 |
+| New Keynesian at the zero lower bound (`zlb.mod`) | 5 | 1 | 1.3e-13 |
+| Irreversible investment (`irreversible.mod`) | 5 | 1 | 2.2e-11 |
 | Smets and Wouters (2007) | 40 | 7 | 2.7e-11 |
 
 The comparison covers the steady state, the decision rule, the eigenvalues,
@@ -130,9 +146,21 @@ fixed path of shocks:
 | Collard's RBC, correlated shocks | 3 | 1.1e-13 |
 | Schorfheide (2000), leads of two periods | 4 | 1.2e-12 |
 | Fernández-Villaverde (2010) | 11 | 1.9e-9 |
+| Irreversible investment | 2 | 4.9e-15 |
 
-The other three models are declared `linear`: Dynare keeps them at first
+The other four models are declared `linear`: Dynare keeps them at first
 order, and the workbench reports second-order terms that are exactly zero.
+
+The two models with an occasionally binding constraint are run through
+Dynare's OccBin as their files stand, with their own `shocks(surprise)`
+and `occbin_solver` settings. The constraint must bind in exactly the same
+periods, and the path with the constraint and the path that ignores it are
+compared in every period and variable:
+
+| Model | Periods | Binds in | Largest relative difference |
+|---|---:|---:|---:|
+| New Keynesian at the zero lower bound | 40 | 5 | 3.2e-14 |
+| Irreversible investment | 60 | 45 | 4.2e-14 |
 
 Two things the comparison brought out.
 
@@ -170,8 +198,11 @@ hard one by four orders of magnitude. (Solving that model's equation in
   the same object and are not compared.
 - No estimation, filtering or forecasting. `estimated_params`, `varobs` and
   `estimation` are read past.
-- No occasionally binding constraints, optimal policy or perfect-foresight
-  simulation.
+- One occasionally binding constraint, not two: Dynare's own
+  `Occbin_example.mod` has two and is read, but shown with neither binding.
+  The method is piecewise linear, so it does not combine with the
+  second-order solution.
+- No optimal policy or perfect-foresight simulation.
 - Moments are those of the unfiltered model (no HP filter).
 - A variable that is stationary only as a combination of unit-root
   variables (a cointegrating relation written out in levels) may get
@@ -185,19 +216,21 @@ hard one by four orders of magnitude. (Solving that model's equation in
 
 runs, with node 22 and nothing else installed:
 
-- the comparison with Dynare for the eight models, to first order and to
-  second (`test/validate.test.mjs`);
-- 28 tests of the reader and the solver (`test/modfile.test.mjs`): each
+- the comparison with Dynare for the ten models, to first order and to
+  second, and with OccBin for the two that have a constraint
+  (`test/validate.test.mjs`);
+- 31 tests of the reader and the solver (`test/modfile.test.mjs`): each
   supported construct, operator precedence, error messages and their line
   numbers, auxiliary variables, correlated shocks, the Taylor principle,
   unit roots, a wrong `steady_state_model`, starting values that follow the
   parameters, Dynare's rule for long leads, second-order means, responses
-  and pruned paths.
+  and pruned paths, the OccBin notation and the paths it leads to.
 
-The page itself is driven in Chromium by `test/browser.mjs` (56 checks:
+The page itself is driven in Chromium by `test/browser.mjs` (69 checks:
 every tab, sliders, the pinned baseline, hover readouts, downloads, the
-share link, the switch to second order and what each tab then shows, a
-file opened from disk, both themes, a phone-width screen):
+share link, the switch to second order and what each tab then shows, the
+Constraint tab, a file opened from disk, both themes, a phone-width
+screen):
 
     python3 -m http.server -d docs 8767 &
     node test/browser.mjs http://localhost:8767/

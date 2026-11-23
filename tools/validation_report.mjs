@@ -4,7 +4,7 @@
 //
 //   node tools/validation_report.mjs
 import fs from "node:fs";
-import { compareWithDynare, compareSecondOrder } from "../test/compare.mjs";
+import { compareWithDynare, compareSecondOrder, compareOccbin } from "../test/compare.mjs";
 import { startEngine } from "../test/engine-node.mjs";
 
 const root = new URL("..", import.meta.url);
@@ -18,7 +18,10 @@ for (const ex of examples) {
   // to second order: null for a model declared linear, which has no second-order terms
   const two = await compareSecondOrder(engine, ex);
   const second = two.linear ? null : Math.max(...Object.values(two.report));
-  models.push({ file: ex.file, title: ex.title, variables, shocks, worst: Math.max(...Object.values(report)), report, second, report2: two.report });
-  console.log(`${ex.title}: ${models.at(-1).worst.toExponential(1)}; second order ${second === null ? "(linear)" : second.toExponential(1)}`);
+  // with its constraint, against Dynare's OccBin: only for the models that have one
+  const occ = ex.occbin ? await compareOccbin(engine, ex) : null;
+  const occbin = occ ? Math.max(...Object.values(occ.report)) : undefined;
+  models.push({ file: ex.file, title: ex.title, variables, shocks, worst: Math.max(...Object.values(report)), report, second, report2: two.report, occbin });
+  console.log(`${ex.title}: ${models.at(-1).worst.toExponential(1)}; second order ${second === null ? "(linear)" : second.toExponential(1)}${occ ? `; OccBin ${occbin.toExponential(1)}, binding in ${occ.bound} of ${occ.periods} periods` : ""}`);
 }
 fs.writeFileSync(new URL("docs/validation.json", root), JSON.stringify({ dynare, cozy: engine.version, models }, null, 1) + "\n");

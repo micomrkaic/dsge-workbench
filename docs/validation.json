@@ -183,6 +183,55 @@
    }
   },
   {
+   "file": "zlb.mod",
+   "title": "New Keynesian at the zero lower bound",
+   "variables": 5,
+   "shocks": 1,
+   "worst": 1.3131620033906819e-13,
+   "report": {
+    "steady": 0,
+    "ghu": 1.3381291428060304e-15,
+    "ghx": 1.6726614285075373e-15,
+    "irf": 2.1418404048112692e-14,
+    "irf_dynare": 1.3131620033906819e-13,
+    "sd": 1.4050355999463315e-15,
+    "autocorr": 5.196051597309627e-16,
+    "corr": 4.436455642857768e-16,
+    "roots": 3.8480627385134927e-16
+   },
+   "second": null,
+   "report2": {},
+   "occbin": 3.164661473671575e-14
+  },
+  {
+   "file": "irreversible.mod",
+   "title": "Irreversible investment (Guerrieri and Iacoviello)",
+   "variables": 5,
+   "shocks": 1,
+   "worst": 2.2198967556649148e-11,
+   "report": {
+    "steady": 0,
+    "ghu": 1.3868655774316927e-15,
+    "ghx": 3.1562257423664045e-14,
+    "irf": 2.2198967556649148e-11,
+    "irf_dynare": 6.809459888037489e-14,
+    "sd": 1.5882599527761685e-15,
+    "autocorr": 6.251276219414283e-16,
+    "corr": 4.436455642857768e-16,
+    "roots": 1.1582792931716393e-14
+   },
+   "second": 4.943900194268466e-15,
+   "report2": {
+    "ghxx": 4.943900194268466e-15,
+    "ghxu": 4.271529767847955e-15,
+    "ghuu": 2.401457191530698e-15,
+    "ghs2": 8.07899990527291e-16,
+    "mean": 1.900403524184353e-16,
+    "simulation": 6.291638874650744e-16
+   },
+   "occbin": 4.176262041164134e-14
+  },
+  {
    "file": "Smets_Wouters_2007.mod",
    "title": "Smets and Wouters (2007)",
    "variables": 40,
