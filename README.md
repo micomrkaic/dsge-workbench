@@ -42,8 +42,8 @@ and there the workbench is the more accurate of the two
   message.
 - **Turns parameters into sliders.** Every parameter with a numeric value
   gets one; parameters defined from others (`beta = 1 / (1 + rho)`) follow.
-  A solve takes a few milliseconds for a textbook model and about a quarter
-  of a second for Smets–Wouters.
+  Everything on the page is recomputed in a few milliseconds for a textbook
+  model and in about 65 ms for Smets–Wouters.
 - **Shows the results.** Impulse responses as small multiples with a
   pinnable baseline, moments and a correlation matrix, the variance
   decomposition, simulated paths and the policy and transition functions.
